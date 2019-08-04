@@ -57,6 +57,7 @@ namespace compiler {
   V(Word32Shr)                            \
   V(Word32Shl)                            \
   V(Word32Sar)                            \
+  V(Word64And)                            \
   V(IntAdd)                               \
   V(IntSub)                               \
   V(IntMul)                               \
@@ -71,6 +72,7 @@ namespace compiler {
   V(Uint64LessThan)                       \
   V(Uint64LessThanOrEqual)                \
   V(Int32LessThan)                        \
+  V(Int64Sub)                             \
   V(Float64Add)                           \
   V(Float64Sub)                           \
   V(Float64Div)                           \
@@ -93,22 +95,24 @@ namespace compiler {
   V(Uint32Mod)                               \
   V(Uint32Div)
 
-#define JSGRAPH_SINGLETON_CONSTANT_LIST(V) \
-  V(TrueConstant)                          \
-  V(FalseConstant)                         \
-  V(NullConstant)                          \
-  V(BigIntMapConstant)                     \
-  V(BooleanMapConstant)                    \
-  V(HeapNumberMapConstant)                 \
-  V(NoContextConstant)                     \
-  V(EmptyStringConstant)                   \
-  V(UndefinedConstant)                     \
-  V(TheHoleConstant)                       \
-  V(FixedArrayMapConstant)                 \
-  V(FixedDoubleArrayMapConstant)           \
-  V(ToNumberBuiltinConstant)               \
-  V(AllocateInYoungGenerationStubConstant) \
-  V(AllocateInOldGenerationStubConstant)
+#define JSGRAPH_SINGLETON_CONSTANT_LIST(V)        \
+  V(TrueConstant)                                 \
+  V(FalseConstant)                                \
+  V(NullConstant)                                 \
+  V(BigIntMapConstant)                            \
+  V(BooleanMapConstant)                           \
+  V(HeapNumberMapConstant)                        \
+  V(NoContextConstant)                            \
+  V(EmptyStringConstant)                          \
+  V(UndefinedConstant)                            \
+  V(TheHoleConstant)                              \
+  V(FixedArrayMapConstant)                        \
+  V(FixedDoubleArrayMapConstant)                  \
+  V(ToNumberBuiltinConstant)                      \
+  V(AllocateInYoungGenerationStubConstant)        \
+  V(AllocateRegularInYoungGenerationStubConstant) \
+  V(AllocateInOldGenerationStubConstant)          \
+  V(AllocateRegularInOldGenerationStubConstant)
 
 class GraphAssembler;
 
@@ -196,6 +200,7 @@ class GraphAssembler {
   Node* Float64Constant(double value);
   Node* Projection(int index, Node* value);
   Node* HeapConstant(Handle<HeapObject> object);
+  Node* NumberConstant(double value);
   Node* CEntryStubConstant(int result_size);
   Node* ExternalConstant(ExternalReference ref);
 

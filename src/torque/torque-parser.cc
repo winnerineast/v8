@@ -129,6 +129,14 @@ V8_EXPORT_PRIVATE const ParseResultTypeId
         ParseResultTypeId::kStdVectorOfNameAndTypeExpression;
 template <>
 V8_EXPORT_PRIVATE const ParseResultTypeId
+    ParseResultHolder<ImplicitParameters>::id =
+        ParseResultTypeId::kImplicitParameters;
+template <>
+V8_EXPORT_PRIVATE const ParseResultTypeId
+    ParseResultHolder<base::Optional<ImplicitParameters>>::id =
+        ParseResultTypeId::kOptionalImplicitParameters;
+template <>
+V8_EXPORT_PRIVATE const ParseResultTypeId
     ParseResultHolder<std::vector<NameAndExpression>>::id =
         ParseResultTypeId::kStdVectorOfNameAndExpression;
 template <>
@@ -376,59 +384,61 @@ base::Optional<ParseResult> MakeSpreadExpression(
   return ParseResult{result};
 }
 
-template <bool has_varargs>
-base::Optional<ParseResult> MakeParameterListFromTypes(
+base::Optional<ParseResult> MakeImplicitParameterList(
     ParseResultIterator* child_results) {
-  auto implicit_params =
-      child_results->NextAs<std::vector<NameAndTypeExpression>>();
-  auto explicit_types = child_results->NextAs<TypeList>();
-  ParameterList result;
-  result.has_varargs = has_varargs;
-  result.implicit_count = implicit_params.size();
-  for (NameAndTypeExpression& implicit_param : implicit_params) {
-    if (!IsLowerCamelCase(implicit_param.name->value)) {
-      NamingConventionError("Parameter", implicit_param.name, "lowerCamelCase");
-    }
-    result.names.push_back(implicit_param.name);
-    result.types.push_back(implicit_param.type);
-  }
-  for (auto* explicit_type : explicit_types) {
-    result.types.push_back(explicit_type);
-  }
-  return ParseResult{std::move(result)};
+  auto kind = child_results->NextAs<Identifier*>();
+  auto parameters = child_results->NextAs<std::vector<NameAndTypeExpression>>();
+  return ParseResult{ImplicitParameters{kind, parameters}};
 }
 
-template <bool has_varargs>
-base::Optional<ParseResult> MakeParameterListFromNameAndTypeList(
+void AddParameter(ParameterList* parameter_list,
+                  const NameAndTypeExpression& param) {
+  if (!IsLowerCamelCase(param.name->value)) {
+    NamingConventionError("Parameter", param.name, "lowerCamelCase");
+  }
+  parameter_list->names.push_back(param.name);
+  parameter_list->types.push_back(param.type);
+}
+
+template <bool has_varargs, bool has_explicit_parameter_names>
+base::Optional<ParseResult> MakeParameterList(
     ParseResultIterator* child_results) {
   auto implicit_params =
-      child_results->NextAs<std::vector<NameAndTypeExpression>>();
-  auto explicit_params =
-      child_results->NextAs<std::vector<NameAndTypeExpression>>();
-  std::string arguments_variable = "";
-  if (child_results->HasNext()) {
-    arguments_variable = child_results->NextAs<std::string>();
-  }
+      child_results->NextAs<base::Optional<ImplicitParameters>>();
   ParameterList result;
-  for (NameAndTypeExpression& pair : implicit_params) {
-    if (!IsLowerCamelCase(pair.name->value)) {
-      NamingConventionError("Parameter", pair.name, "lowerCamelCase");
-    }
-
-    result.names.push_back(std::move(pair.name));
-    result.types.push_back(pair.type);
-  }
-  for (NameAndTypeExpression& pair : explicit_params) {
-    if (!IsLowerCamelCase(pair.name->value)) {
-      NamingConventionError("Parameter", pair.name, "lowerCamelCase");
-    }
-
-    result.names.push_back(pair.name);
-    result.types.push_back(pair.type);
-  }
-  result.implicit_count = implicit_params.size();
   result.has_varargs = has_varargs;
-  result.arguments_variable = arguments_variable;
+  result.implicit_count = 0;
+  result.implicit_kind = ImplicitKind::kNoImplicit;
+  if (implicit_params) {
+    result.implicit_count = implicit_params->parameters.size();
+    if (implicit_params->kind->value == "implicit") {
+      result.implicit_kind = ImplicitKind::kImplicit;
+    } else {
+      DCHECK_EQ(implicit_params->kind->value, "js-implicit");
+      result.implicit_kind = ImplicitKind::kJSImplicit;
+    }
+    result.implicit_kind_pos = implicit_params->kind->pos;
+    for (NameAndTypeExpression& implicit_param : implicit_params->parameters) {
+      AddParameter(&result, implicit_param);
+    }
+  }
+  if (has_explicit_parameter_names) {
+    auto explicit_params =
+        child_results->NextAs<std::vector<NameAndTypeExpression>>();
+    std::string arguments_variable = "";
+    if (has_varargs) {
+      arguments_variable = child_results->NextAs<std::string>();
+    }
+    for (NameAndTypeExpression& param : explicit_params) {
+      AddParameter(&result, param);
+    }
+    result.arguments_variable = arguments_variable;
+  } else {
+    auto explicit_types = child_results->NextAs<TypeList>();
+    for (auto* explicit_type : explicit_types) {
+      result.types.push_back(explicit_type);
+    }
+  }
   return ParseResult{std::move(result)};
 }
 
@@ -451,8 +461,8 @@ base::Optional<ParseResult> MakeDebugStatement(
 }
 
 base::Optional<ParseResult> MakeVoidType(ParseResultIterator* child_results) {
-  TypeExpression* result =
-      MakeNode<BasicTypeExpression>(std::vector<std::string>{}, "void");
+  TypeExpression* result = MakeNode<BasicTypeExpression>(
+      std::vector<std::string>{}, "void", std::vector<TypeExpression*>{});
   return ParseResult{result};
 }
 
@@ -766,10 +776,13 @@ base::Optional<ParseResult> MakeStructDeclaration(
   if (!IsValidTypeName(name->value)) {
     NamingConventionError("Struct", name, "UpperCamelCase");
   }
+  auto generic_parameters = child_results->NextAs<GenericParameters>();
+  LintGenericParameters(generic_parameters);
   auto methods = child_results->NextAs<std::vector<Declaration*>>();
   auto fields = child_results->NextAs<std::vector<StructFieldExpression>>();
   Declaration* result =
-      MakeNode<StructDeclaration>(name, std::move(methods), std::move(fields));
+      MakeNode<StructDeclaration>(name, std::move(methods), std::move(fields),
+                                  std::move(generic_parameters));
   return ParseResult{result};
 }
 
@@ -845,9 +858,12 @@ base::Optional<ParseResult> MakeBasicTypeExpression(
       child_results->NextAs<std::vector<std::string>>();
   auto is_constexpr = child_results->NextAs<bool>();
   auto name = child_results->NextAs<std::string>();
+  auto generic_arguments =
+      child_results->NextAs<std::vector<TypeExpression*>>();
   TypeExpression* result = MakeNode<BasicTypeExpression>(
       std::move(namespace_qualification),
-      is_constexpr ? GetConstexprName(name) : std::move(name));
+      is_constexpr ? GetConstexprName(name) : std::move(name),
+      std::move(generic_arguments));
   return ParseResult{result};
 }
 
@@ -863,7 +879,11 @@ base::Optional<ParseResult> MakeFunctionTypeExpression(
 base::Optional<ParseResult> MakeReferenceTypeExpression(
     ParseResultIterator* child_results) {
   auto referenced_type = child_results->NextAs<TypeExpression*>();
-  TypeExpression* result = MakeNode<ReferenceTypeExpression>(referenced_type);
+  std::vector<std::string> namespace_qualification{
+      TORQUE_INTERNAL_NAMESPACE_STRING};
+  std::vector<TypeExpression*> generic_arguments{referenced_type};
+  TypeExpression* result = MakeNode<BasicTypeExpression>(
+      namespace_qualification, REFERENCE_TYPE_STRING, generic_arguments);
   return ParseResult{result};
 }
 
@@ -1124,8 +1144,8 @@ base::Optional<ParseResult> MakeCatchBlock(ParseResultIterator* child_results) {
   }
   ParameterList parameters;
   parameters.names.push_back(MakeNode<Identifier>(variable));
-  parameters.types.push_back(
-      MakeNode<BasicTypeExpression>(std::vector<std::string>{}, "Object"));
+  parameters.types.push_back(MakeNode<BasicTypeExpression>(
+      std::vector<std::string>{}, "Object", std::vector<TypeExpression*>{}));
   parameters.has_varargs = false;
   LabelBlock* result = MakeNode<LabelBlock>(
       MakeNode<Identifier>(kCatchLabelName), std::move(parameters), body);
@@ -1149,6 +1169,17 @@ base::Optional<ParseResult> MakeIdentifierFromMatchedInput(
     ParseResultIterator* child_results) {
   return ParseResult{
       MakeNode<Identifier>(child_results->matched_input().ToString())};
+}
+
+base::Optional<ParseResult> MakeRightShiftIdentifier(
+    ParseResultIterator* child_results) {
+  std::string str = child_results->matched_input().ToString();
+  for (auto character : str) {
+    if (character != '>') {
+      ReportError("right-shift operators may not contain any whitespace");
+    }
+  }
+  return ParseResult{MakeNode<Identifier>(str)};
 }
 
 base::Optional<ParseResult> MakeIdentifierExpression(
@@ -1481,7 +1512,9 @@ struct TorqueGrammar : Grammar {
   Symbol simpleType = {
       Rule({Token("("), &type, Token(")")}),
       Rule({List<std::string>(Sequence({&identifier, Token("::")})),
-            CheckIf(Token("constexpr")), &identifier},
+            CheckIf(Token("constexpr")), &identifier,
+            TryOrDefault<std::vector<TypeExpression*>>(
+                &genericSpecializationTypeList)},
            MakeBasicTypeExpression),
       Rule({Token("builtin"), Token("("), typeList, Token(")"), Token("=>"),
             &simpleType},
@@ -1506,20 +1539,22 @@ struct TorqueGrammar : Grammar {
   // Result: base::Optional<TypeList>
   Symbol* optionalGenericParameters = Optional<TypeList>(&genericParameters);
 
+  Symbol implicitParameterList{
+      Rule({Token("("), OneOf({"implicit", "js-implicit"}),
+            List<NameAndTypeExpression>(&nameAndType, Token(",")), Token(")")},
+           MakeImplicitParameterList)};
+
   Symbol* optionalImplicitParameterList{
-      TryOrDefault<std::vector<NameAndTypeExpression>>(
-          Sequence({Token("("), Token("implicit"),
-                    List<NameAndTypeExpression>(&nameAndType, Token(",")),
-                    Token(")")}))};
+      Optional<ImplicitParameters>(&implicitParameterList)};
 
   // Result: ParameterList
   Symbol typeListMaybeVarArgs = {
       Rule({optionalImplicitParameterList, Token("("),
             List<TypeExpression*>(Sequence({&type, Token(",")})), Token("..."),
             Token(")")},
-           MakeParameterListFromTypes<true>),
+           MakeParameterList<true, false>),
       Rule({optionalImplicitParameterList, Token("("), typeList, Token(")")},
-           MakeParameterListFromTypes<false>)};
+           MakeParameterList<false, false>)};
 
   // Result: LabelAndTypes
   Symbol labelParameter = {Rule(
@@ -1566,15 +1601,15 @@ struct TorqueGrammar : Grammar {
   Symbol parameterListNoVararg = {
       Rule({optionalImplicitParameterList, Token("("),
             List<NameAndTypeExpression>(&nameAndType, Token(",")), Token(")")},
-           MakeParameterListFromNameAndTypeList<false>)};
+           MakeParameterList<false, true>)};
 
   // Result: ParameterList
   Symbol parameterListAllowVararg = {
       Rule({&parameterListNoVararg}),
       Rule({optionalImplicitParameterList, Token("("),
-            NonemptyList<NameAndTypeExpression>(&nameAndType, Token(",")),
-            Token(","), Token("..."), &identifier, Token(")")},
-           MakeParameterListFromNameAndTypeList<true>)};
+            List<NameAndTypeExpression>(Sequence({&nameAndType, Token(",")})),
+            Token("..."), &identifier, Token(")")},
+           MakeParameterList<true, true>)};
 
   // Result: Identifier*
   Symbol* OneOf(const std::vector<std::string>& alternatives) {
@@ -1677,9 +1712,14 @@ struct TorqueGrammar : Grammar {
   Symbol* additiveExpression =
       BinaryOperator(multiplicativeExpression, OneOf({"+", "-"}));
 
+  // Result: Identifier*
+  Symbol shiftOperator = {
+      Rule({Token("<<")}, MakeIdentifierFromMatchedInput),
+      Rule({Token(">"), Token(">")}, MakeRightShiftIdentifier),
+      Rule({Token(">"), Token(">"), Token(">")}, MakeRightShiftIdentifier)};
+
   // Result: Expression*
-  Symbol* shiftExpression =
-      BinaryOperator(additiveExpression, OneOf({"<<", ">>", ">>>"}));
+  Symbol* shiftExpression = BinaryOperator(additiveExpression, &shiftOperator);
 
   // Do not allow expressions like a < b > c because this is never
   // useful and ambiguous with template parameters.
@@ -1841,7 +1881,9 @@ struct TorqueGrammar : Grammar {
             Token("{"), List<Declaration*>(&method),
             List<ClassFieldExpression>(&classField), Token("}")},
            AsSingletonVector<Declaration*, MakeClassDeclaration>()),
-      Rule({Token("struct"), &name, Token("{"), List<Declaration*>(&method),
+      Rule({Token("struct"), &name,
+            TryOrDefault<GenericParameters>(&genericParameters), Token("{"),
+            List<Declaration*>(&method),
             List<StructFieldExpression>(&structField), Token("}")},
            AsSingletonVector<Declaration*, MakeStructDeclaration>()),
       Rule({CheckIf(Token("transient")), Token("type"), &name,

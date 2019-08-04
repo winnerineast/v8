@@ -1056,10 +1056,14 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
   FrameScope frame_scope(masm, StackFrame::MANUAL);
   __ PushStandardFrame(closure);
 
-  // Reset code age.
-  DCHECK_EQ(0, BytecodeArray::kNoAgeBytecodeAge);
-  __ sb(zero_reg, FieldMemOperand(kInterpreterBytecodeArrayRegister,
-                                  BytecodeArray::kBytecodeAgeOffset));
+  // Reset code age and the OSR arming. The OSR field and BytecodeAgeOffset are
+  // 8-bit fields next to each other, so we could just optimize by writing a
+  // 16-bit. These static asserts guard our assumption is valid.
+  STATIC_ASSERT(BytecodeArray::kBytecodeAgeOffset ==
+                BytecodeArray::kOsrNestingLevelOffset + kCharSize);
+  STATIC_ASSERT(BytecodeArray::kNoAgeBytecodeAge == 0);
+  __ sh(zero_reg, FieldMemOperand(kInterpreterBytecodeArrayRegister,
+                                  BytecodeArray::kOsrNestingLevelOffset));
 
   // Load initial bytecode offset.
   __ li(kInterpreterBytecodeOffsetRegister,
@@ -1467,11 +1471,13 @@ void Generate_ContinueToBuiltinHelper(MacroAssembler* masm,
   }
   __ lw(fp, MemOperand(
                 sp, BuiltinContinuationFrameConstants::kFixedFrameSizeFromFp));
+  // Load builtin index (stored as a Smi) and use it to get the builtin start
+  // address from the builtins table.
   __ Pop(t0);
   __ Addu(sp, sp,
           Operand(BuiltinContinuationFrameConstants::kFixedFrameSizeFromFp));
   __ Pop(ra);
-  __ Addu(t0, t0, Operand(Code::kHeaderSize - kHeapObjectTag));
+  __ LoadEntryFromBuiltinIndex(t0);
   __ Jump(t0);
 }
 }  // namespace
@@ -2482,7 +2488,10 @@ void Builtins::Generate_WasmCompileLazy(MacroAssembler* masm) {
     __ Push(kWasmInstanceRegister, kWasmCompileLazyFuncIndexRegister);
     // Load the correct CEntry builtin from the instance object.
     __ lw(a2, FieldMemOperand(kWasmInstanceRegister,
-                              WasmInstanceObject::kCEntryStubOffset));
+                              WasmInstanceObject::kIsolateRootOffset));
+    auto centry_id =
+        Builtins::kCEntry_Return1_DontSaveFPRegs_ArgvOnStack_NoBuiltinExit;
+    __ lw(a2, MemOperand(a2, IsolateData::builtin_slot_offset(centry_id)));
     // Initialize the JavaScript context with 0. CEntry will use it to
     // set the current context on the isolate.
     __ Move(kContextRegister, Smi::zero());
@@ -2562,7 +2571,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
     __ LoadRoot(t0, RootIndex::kTheHoleValue);
     // Cannot use check here as it attempts to generate call into runtime.
     __ Branch(&okay, eq, t0, Operand(a2));
-    __ stop("Unexpected pending exception");
+    __ stop();
     __ bind(&okay);
   }
 
@@ -2828,18 +2837,23 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
 
   DCHECK(function_address == a1 || function_address == a2);
 
-  Label profiler_disabled;
-  Label end_profiler_check;
+  Label profiler_enabled, end_profiler_check;
   __ li(t9, ExternalReference::is_profiling_address(isolate));
   __ lb(t9, MemOperand(t9, 0));
-  __ Branch(&profiler_disabled, eq, t9, Operand(zero_reg));
-
-  // Additional parameter is the address of the actual callback.
-  __ li(t9, thunk_ref);
-  __ jmp(&end_profiler_check);
-
-  __ bind(&profiler_disabled);
-  __ mov(t9, function_address);
+  __ Branch(&profiler_enabled, ne, t9, Operand(zero_reg));
+  __ li(t9, ExternalReference::address_of_runtime_stats_flag());
+  __ lw(t9, MemOperand(t9, 0));
+  __ Branch(&profiler_enabled, ne, t9, Operand(zero_reg));
+  {
+    // Call the api function directly.
+    __ mov(t9, function_address);
+    __ Branch(&end_profiler_check);
+  }
+  __ bind(&profiler_enabled);
+  {
+    // Additional parameter is the address of the actual callback.
+    __ li(t9, thunk_ref);
+  }
   __ bind(&end_profiler_check);
 
   // Allocate HandleScope in callee-save registers.

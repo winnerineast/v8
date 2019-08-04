@@ -4,9 +4,10 @@
 
 namespace array_map {
   transitioning javascript builtin
-  ArrayMapLoopEagerDeoptContinuation(implicit context: Context)(
-      receiver: Object, callback: Object, thisArg: Object, array: Object,
-      initialK: Object, length: Object): Object {
+  ArrayMapLoopEagerDeoptContinuation(
+      js-implicit context: Context, receiver: Object)(
+      callback: Object, thisArg: Object, array: Object, initialK: Object,
+      length: Object): Object {
     // All continuation points in the optimized filter implementation are
     // after the ToObject(O) call that ensures we are dealing with a
     // JSReceiver.
@@ -26,9 +27,10 @@ namespace array_map {
   }
 
   transitioning javascript builtin
-  ArrayMapLoopLazyDeoptContinuation(implicit context: Context)(
-      receiver: Object, callback: Object, thisArg: Object, array: Object,
-      initialK: Object, length: Object, result: Object): Object {
+  ArrayMapLoopLazyDeoptContinuation(
+      js-implicit context: Context, receiver: Object)(
+      callback: Object, thisArg: Object, array: Object, initialK: Object,
+      length: Object, result: Object): Object {
     // All continuation points in the optimized filter implementation are
     // after the ToObject(O) call that ensures we are dealing with a
     // JSReceiver.
@@ -130,7 +132,7 @@ namespace array_map {
               elements.floats[i] = Convert<float64>(n);
             }
             case (h: HeapObject): {
-              assert(h == Hole);
+              assert(h == TheHole);
             }
           }
         }
@@ -222,9 +224,10 @@ namespace array_map {
 
   // https://tc39.github.io/ecma262/#sec-array.prototype.map
   transitioning javascript builtin
-  ArrayMap(implicit context: Context)(receiver: Object, ...arguments): Object {
+  ArrayMap(js-implicit context: Context, receiver: Object)(...arguments):
+      Object {
     try {
-      if (IsNullOrUndefined(receiver)) goto NullOrUndefinedError;
+      RequireObjectCoercible(receiver, 'Array.prototype.map');
 
       // 1. Let O be ? ToObject(this value).
       const o: JSReceiver = ToObject_Inline(context, receiver);
@@ -265,9 +268,6 @@ namespace array_map {
     }
     label TypeError deferred {
       ThrowTypeError(kCalledNonCallable, arguments[0]);
-    }
-    label NullOrUndefinedError deferred {
-      ThrowTypeError(kCalledOnNullOrUndefined, 'Array.prototype.map');
     }
   }
 }

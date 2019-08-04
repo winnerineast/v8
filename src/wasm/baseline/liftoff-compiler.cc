@@ -218,12 +218,12 @@ class LiftoffCompiler {
       case kWasmS128:
         return kSimd;
       case kWasmAnyRef:
-      case kWasmAnyFunc:
+      case kWasmFuncRef:
       case kWasmNullRef:
         return kAnyRef;
-      case kWasmExceptRef:
+      case kWasmExnRef:
         return kExceptionHandling;
-      case kWasmVar:
+      case kWasmBottom:
         return kMultiValue;
       default:
         return kOtherReason;
@@ -416,17 +416,17 @@ class LiftoffCompiler {
     DCHECK_EQ(__ num_locals(), __ cache_state()->stack_height());
   }
 
-  void GenerateOutOfLineCode(OutOfLineCode& ool) {
-    __ bind(ool.label.get());
-    const bool is_stack_check = ool.stub == WasmCode::kWasmStackGuard;
+  void GenerateOutOfLineCode(OutOfLineCode* ool) {
+    __ bind(ool->label.get());
+    const bool is_stack_check = ool->stub == WasmCode::kWasmStackGuard;
     const bool is_mem_out_of_bounds =
-        ool.stub == WasmCode::kThrowWasmTrapMemOutOfBounds;
+        ool->stub == WasmCode::kThrowWasmTrapMemOutOfBounds;
 
     if (is_mem_out_of_bounds && env_->use_trap_handler) {
       uint32_t pc = static_cast<uint32_t>(__ pc_offset());
       DCHECK_EQ(pc, __ pc_offset());
       protected_instructions_.emplace_back(
-          trap_handler::ProtectedInstructionData{ool.pc, pc});
+          trap_handler::ProtectedInstructionData{ool->pc, pc});
     }
 
     if (!env_->runtime_exception_support) {
@@ -441,16 +441,16 @@ class LiftoffCompiler {
       return;
     }
 
-    if (!ool.regs_to_save.is_empty()) __ PushRegisters(ool.regs_to_save);
+    if (!ool->regs_to_save.is_empty()) __ PushRegisters(ool->regs_to_save);
 
     source_position_table_builder_.AddPosition(
-        __ pc_offset(), SourcePosition(ool.position), false);
-    __ CallRuntimeStub(ool.stub);
+        __ pc_offset(), SourcePosition(ool->position), false);
+    __ CallRuntimeStub(ool->stub);
     safepoint_table_builder_.DefineSafepoint(&asm_, Safepoint::kNoLazyDeopt);
-    DCHECK_EQ(ool.continuation.get()->is_bound(), is_stack_check);
-    if (!ool.regs_to_save.is_empty()) __ PopRegisters(ool.regs_to_save);
+    DCHECK_EQ(ool->continuation.get()->is_bound(), is_stack_check);
+    if (!ool->regs_to_save.is_empty()) __ PopRegisters(ool->regs_to_save);
     if (is_stack_check) {
-      __ emit_jump(ool.continuation.get());
+      __ emit_jump(ool->continuation.get());
     } else {
       __ AssertUnreachable(AbortReason::kUnexpectedReturnFromWasmTrap);
     }
@@ -459,7 +459,7 @@ class LiftoffCompiler {
   void FinishFunction(FullDecoder* decoder) {
     if (DidAssemblerBailout(decoder)) return;
     for (OutOfLineCode& ool : out_of_line_code_) {
-      GenerateOutOfLineCode(ool);
+      GenerateOutOfLineCode(&ool);
     }
     __ PatchPrepareStackFrame(pc_offset_stack_frame_construction_,
                               __ GetTotalFrameSlotCount());
@@ -1245,24 +1245,24 @@ class LiftoffCompiler {
     }
   }
 
-  void SetLocalFromStackSlot(LiftoffAssembler::VarState& dst_slot,
+  void SetLocalFromStackSlot(LiftoffAssembler::VarState* dst_slot,
                              uint32_t local_index) {
     auto& state = *__ cache_state();
-    ValueType type = dst_slot.type();
-    if (dst_slot.is_reg()) {
-      LiftoffRegister slot_reg = dst_slot.reg();
+    ValueType type = dst_slot->type();
+    if (dst_slot->is_reg()) {
+      LiftoffRegister slot_reg = dst_slot->reg();
       if (state.get_use_count(slot_reg) == 1) {
-        __ Fill(dst_slot.reg(), state.stack_height() - 1, type);
+        __ Fill(dst_slot->reg(), state.stack_height() - 1, type);
         return;
       }
       state.dec_used(slot_reg);
-      dst_slot.MakeStack();
+      dst_slot->MakeStack();
     }
     DCHECK_EQ(type, __ local_type(local_index));
     RegClass rc = reg_class_for(type);
     LiftoffRegister dst_reg = __ GetUnusedRegister(rc);
     __ Fill(dst_reg, __ cache_state()->stack_height() - 1, type);
-    dst_slot = LiftoffAssembler::VarState(type, dst_reg);
+    *dst_slot = LiftoffAssembler::VarState(type, dst_reg);
     __ cache_state()->inc_used(dst_reg);
   }
 
@@ -1281,7 +1281,7 @@ class LiftoffCompiler {
         target_slot = source_slot;
         break;
       case kStack:
-        SetLocalFromStackSlot(target_slot, local_index);
+        SetLocalFromStackSlot(&target_slot, local_index);
         break;
     }
     if (!is_tee) __ cache_state()->stack_state.pop_back();
@@ -1298,12 +1298,12 @@ class LiftoffCompiler {
   }
 
   Register GetGlobalBaseAndOffset(const WasmGlobal* global,
-                                  LiftoffRegList& pinned, uint32_t* offset) {
-    Register addr = pinned.set(__ GetUnusedRegister(kGpReg)).gp();
+                                  LiftoffRegList* pinned, uint32_t* offset) {
+    Register addr = pinned->set(__ GetUnusedRegister(kGpReg)).gp();
     if (global->mutability && global->imported) {
       LOAD_INSTANCE_FIELD(addr, ImportedMutableGlobals, kSystemPointerSize);
       __ Load(LiftoffRegister(addr), addr, no_reg,
-              global->index * sizeof(Address), kPointerLoadType, pinned);
+              global->index * sizeof(Address), kPointerLoadType, *pinned);
       *offset = 0;
     } else {
       LOAD_INSTANCE_FIELD(addr, GlobalsStart, kSystemPointerSize);
@@ -1319,7 +1319,7 @@ class LiftoffCompiler {
       return;
     LiftoffRegList pinned;
     uint32_t offset = 0;
-    Register addr = GetGlobalBaseAndOffset(global, pinned, &offset);
+    Register addr = GetGlobalBaseAndOffset(global, &pinned, &offset);
     LiftoffRegister value =
         pinned.set(__ GetUnusedRegister(reg_class_for(global->type), pinned));
     LoadType type = LoadType::ForValueType(global->type);
@@ -1334,19 +1334,19 @@ class LiftoffCompiler {
       return;
     LiftoffRegList pinned;
     uint32_t offset = 0;
-    Register addr = GetGlobalBaseAndOffset(global, pinned, &offset);
+    Register addr = GetGlobalBaseAndOffset(global, &pinned, &offset);
     LiftoffRegister reg = pinned.set(__ PopToRegister(pinned));
     StoreType type = StoreType::ForValueType(global->type);
     __ Store(addr, no_reg, offset, reg, type, {}, nullptr, true);
   }
 
-  void GetTable(FullDecoder* decoder, const Value& index, Value* result,
-                TableIndexImmediate<validate>& imm) {
+  void TableGet(FullDecoder* decoder, const Value& index, Value* result,
+                const TableIndexImmediate<validate>& imm) {
     unsupported(decoder, kAnyRef, "table_get");
   }
 
-  void SetTable(FullDecoder* decoder, const Value& index, const Value& value,
-                TableIndexImmediate<validate>& imm) {
+  void TableSet(FullDecoder* decoder, const Value& index, const Value& value,
+                const TableIndexImmediate<validate>& imm) {
     unsupported(decoder, kAnyRef, "table_set");
   }
 
@@ -1414,8 +1414,8 @@ class LiftoffCompiler {
   // Generate a branch table case, potentially reusing previously generated
   // stack transfer code.
   void GenerateBrCase(FullDecoder* decoder, uint32_t br_depth,
-                      std::map<uint32_t, MovableLabel>& br_targets) {
-    MovableLabel& label = br_targets[br_depth];
+                      std::map<uint32_t, MovableLabel>* br_targets) {
+    MovableLabel& label = (*br_targets)[br_depth];
     if (label.get()->is_bound()) {
       __ jmp(label.get());
     } else {
@@ -1428,13 +1428,13 @@ class LiftoffCompiler {
   // TODO(wasm): Generate a real branch table (like TF TableSwitch).
   void GenerateBrTable(FullDecoder* decoder, LiftoffRegister tmp,
                        LiftoffRegister value, uint32_t min, uint32_t max,
-                       BranchTableIterator<validate>& table_iterator,
-                       std::map<uint32_t, MovableLabel>& br_targets) {
+                       BranchTableIterator<validate>* table_iterator,
+                       std::map<uint32_t, MovableLabel>* br_targets) {
     DCHECK_LT(min, max);
     // Check base case.
     if (max == min + 1) {
-      DCHECK_EQ(min, table_iterator.cur_index());
-      GenerateBrCase(decoder, table_iterator.next(), br_targets);
+      DCHECK_EQ(min, table_iterator->cur_index());
+      GenerateBrCase(decoder, table_iterator->next(), br_targets);
       return;
     }
 
@@ -1466,14 +1466,14 @@ class LiftoffCompiler {
       __ emit_cond_jump(kUnsignedGreaterEqual, &case_default, kWasmI32,
                         value.gp(), tmp.gp());
 
-      GenerateBrTable(decoder, tmp, value, 0, imm.table_count, table_iterator,
-                      br_targets);
+      GenerateBrTable(decoder, tmp, value, 0, imm.table_count, &table_iterator,
+                      &br_targets);
 
       __ bind(&case_default);
     }
 
     // Generate the default case.
-    GenerateBrCase(decoder, table_iterator.next(), br_targets);
+    GenerateBrCase(decoder, table_iterator.next(), &br_targets);
     DCHECK(!table_iterator.has_next());
   }
 
@@ -1606,38 +1606,41 @@ class LiftoffCompiler {
 
   void GenerateRuntimeCall(Runtime::FunctionId runtime_function, int num_args,
                            Register* args) {
-    auto call_descriptor = compiler::Linkage::GetRuntimeCallDescriptor(
-        compilation_zone_, runtime_function, num_args,
-        compiler::Operator::kNoProperties, compiler::CallDescriptor::kNoFlags);
     // Currently, only one argument is supported. More arguments require some
     // caution for the parallel register moves (reuse StackTransferRecipe).
     DCHECK_EQ(1, num_args);
+#ifdef DEBUG
+    auto call_descriptor = compiler::Linkage::GetRuntimeCallDescriptor(
+        compilation_zone_, runtime_function, num_args,
+        compiler::Operator::kNoProperties, compiler::CallDescriptor::kNoFlags);
     constexpr size_t kInputShift = 1;  // Input 0 is the call target.
     compiler::LinkageLocation param_loc =
         call_descriptor->GetInputLocation(kInputShift);
-    if (param_loc.IsRegister()) {
-      Register reg = Register::from_code(param_loc.AsRegister());
-      __ Move(LiftoffRegister(reg), LiftoffRegister(args[0]),
-              LiftoffAssembler::kWasmIntPtr);
-    } else {
-      DCHECK(param_loc.IsCallerFrameSlot());
-      LiftoffStackSlots stack_slots(&asm_);
-      stack_slots.Add(LiftoffAssembler::VarState(LiftoffAssembler::kWasmIntPtr,
-                                                 LiftoffRegister(args[0])));
-      stack_slots.Construct();
-    }
+    // Runtime calls take their arguments on the stack.
+    DCHECK(param_loc.IsCallerFrameSlot());
+#endif
+    LiftoffStackSlots stack_slots(&asm_);
+    stack_slots.Add(LiftoffAssembler::VarState(LiftoffAssembler::kWasmIntPtr,
+                                               LiftoffRegister(args[0])));
+    stack_slots.Construct();
 
     // Set context to "no context" for the runtime call.
     __ TurboAssembler::Move(kContextRegister,
                             Smi::FromInt(Context::kNoContext));
     Register centry = kJavaScriptCallCodeStartRegister;
-    LOAD_TAGGED_PTR_INSTANCE_FIELD(centry, CEntryStub);
+    LOAD_INSTANCE_FIELD(centry, IsolateRoot, kSystemPointerSize);
+    // All cache registers are spilled and there are no register arguments.
+    LiftoffRegList pinned;
+    auto centry_id =
+        Builtins::kCEntry_Return1_DontSaveFPRegs_ArgvOnStack_NoBuiltinExit;
+    __ LoadTaggedPointer(centry, centry, no_reg,
+                         IsolateData::builtin_slot_offset(centry_id), pinned);
     __ CallRuntimeWithCEntry(runtime_function, centry);
     safepoint_table_builder_.DefineSafepoint(&asm_, Safepoint::kNoLazyDeopt);
   }
 
   Register AddMemoryMasking(Register index, uint32_t* offset,
-                            LiftoffRegList& pinned) {
+                            LiftoffRegList* pinned) {
     if (!FLAG_untrusted_code_mitigations || env_->use_trap_handler) {
       return index;
     }
@@ -1645,11 +1648,11 @@ class LiftoffCompiler {
     // Make sure that we can overwrite {index}.
     if (__ cache_state()->is_used(LiftoffRegister(index))) {
       Register old_index = index;
-      pinned.clear(LiftoffRegister(old_index));
-      index = pinned.set(__ GetUnusedRegister(kGpReg, pinned)).gp();
+      pinned->clear(LiftoffRegister(old_index));
+      index = pinned->set(__ GetUnusedRegister(kGpReg, *pinned)).gp();
       if (index != old_index) __ Move(index, old_index, kWasmI32);
     }
-    Register tmp = __ GetUnusedRegister(kGpReg, pinned).gp();
+    Register tmp = __ GetUnusedRegister(kGpReg, *pinned).gp();
     __ emit_ptrsize_add(index, index, *offset);
     LOAD_INSTANCE_FIELD(tmp, MemoryMask, kSystemPointerSize);
     __ emit_ptrsize_and(index, index, tmp);
@@ -1669,7 +1672,7 @@ class LiftoffCompiler {
       return;
     }
     uint32_t offset = imm.offset;
-    index = AddMemoryMasking(index, &offset, pinned);
+    index = AddMemoryMasking(index, &offset, &pinned);
     DEBUG_CODE_COMMENT("Load from memory");
     Register addr = pinned.set(__ GetUnusedRegister(kGpReg, pinned)).gp();
     LOAD_INSTANCE_FIELD(addr, MemoryStart, kSystemPointerSize);
@@ -1703,7 +1706,7 @@ class LiftoffCompiler {
       return;
     }
     uint32_t offset = imm.offset;
-    index = AddMemoryMasking(index, &offset, pinned);
+    index = AddMemoryMasking(index, &offset, &pinned);
     DEBUG_CODE_COMMENT("Store to memory");
     Register addr = pinned.set(__ GetUnusedRegister(kGpReg, pinned)).gp();
     LOAD_INSTANCE_FIELD(addr, MemoryStart, kSystemPointerSize);
@@ -2007,6 +2010,9 @@ class LiftoffCompiler {
                 const MemoryAccessImmediate<validate>& imm, Value* result) {
     unsupported(decoder, kAtomics, "atomicop");
   }
+  void AtomicFence(FullDecoder* decoder) {
+    unsupported(decoder, kAtomics, "atomic.fence");
+  }
   void MemoryInit(FullDecoder* decoder,
                   const MemoryInitImmediate<validate>& imm, const Value& dst,
                   const Value& src, const Value& size) {
@@ -2037,7 +2043,7 @@ class LiftoffCompiler {
     unsupported(decoder, kBulkMemory, "table.copy");
   }
   void TableGrow(FullDecoder* decoder, const TableIndexImmediate<validate>& imm,
-                 Value& value, Value& delta, Value* result) {
+                 const Value& value, const Value& delta, Value* result) {
     unsupported(decoder, kAnyRef, "table.grow");
   }
   void TableSize(FullDecoder* decoder, const TableIndexImmediate<validate>& imm,
@@ -2045,7 +2051,7 @@ class LiftoffCompiler {
     unsupported(decoder, kAnyRef, "table.size");
   }
   void TableFill(FullDecoder* decoder, const TableIndexImmediate<validate>& imm,
-                 Value& start, Value& value, Value& count) {
+                 const Value& start, const Value& value, const Value& count) {
     unsupported(decoder, kAnyRef, "table.fill");
   }
 

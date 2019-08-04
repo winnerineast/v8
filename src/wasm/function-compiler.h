@@ -18,6 +18,7 @@ namespace internal {
 
 class AssemblerBuffer;
 class Counters;
+class OptimizedCompilationJob;
 
 namespace wasm {
 
@@ -33,6 +34,10 @@ class WasmInstructionBuffer final {
   std::unique_ptr<uint8_t[]> ReleaseBuffer();
 
   static std::unique_ptr<WasmInstructionBuffer> New();
+
+  // Override {operator delete} to avoid implicit instantiation of {operator
+  // delete} with {size_t} argument. The {size_t} argument would be incorrect.
+  void operator delete(void* ptr) { ::operator delete(ptr); }
 
  private:
   WasmInstructionBuffer() = delete;
@@ -100,6 +105,29 @@ class V8_EXPORT_PRIVATE WasmCompilationUnit final {
 // efficiently pass it by value.
 ASSERT_TRIVIALLY_COPYABLE(WasmCompilationUnit);
 STATIC_ASSERT(sizeof(WasmCompilationUnit) <= 2 * kSystemPointerSize);
+
+class V8_EXPORT_PRIVATE JSToWasmWrapperCompilationUnit final {
+ public:
+  JSToWasmWrapperCompilationUnit(Isolate* isolate, WasmEngine* wasm_engine,
+                                 FunctionSig* sig, bool is_import,
+                                 const WasmFeatures& enabled_features);
+  ~JSToWasmWrapperCompilationUnit();
+
+  void Execute();
+  Handle<Code> Finalize(Isolate* isolate);
+
+  bool is_import() const { return is_import_; }
+  FunctionSig* sig() const { return sig_; }
+
+  // Run a compilation unit synchronously.
+  static Handle<Code> CompileJSToWasmWrapper(Isolate* isolate, FunctionSig* sig,
+                                             bool is_import);
+
+ private:
+  bool is_import_;
+  FunctionSig* sig_;
+  std::unique_ptr<OptimizedCompilationJob> job_;
+};
 
 }  // namespace wasm
 }  // namespace internal

@@ -81,9 +81,6 @@
   'test-cpu-profiler/SampleWhenFrameIsNotSetup': [SKIP],
   'test-sampler/LibSamplerCollectSample': [SKIP],
 
-  # BUG(v8:9057). Flaky, maybe only on UBSan
-  'test-cpu-profiler/DeoptAtFirstLevelInlinedSource': [SKIP],
-
   # BUG(7202). The test is flaky.
   'test-cpu-profiler/NativeFrameStackTrace': [SKIP],
 
@@ -199,6 +196,12 @@
   # https://crbug.com/v8/7763
   'test-lockers/ExtensionsRegistration': [SKIP],
 }],  # 'no_snap == True'
+
+##############################################################################
+['no_snap == True and system != windows and mode == debug', {
+  # BUG(v8:9400).
+  'test-heap/Regress615489': [SKIP],
+}], # 'no_snap == True and system != windows and mode == debug'
 
 ##############################################################################
 # TODO(machenbach): Fix application of '*'. Nosnap windows needs a separate
@@ -468,8 +471,10 @@
   'test-api/WasmI32AtomicWaitCallback': [SKIP],
   'test-api/WasmI64AtomicWaitCallback': [SKIP],
   'test-api/WasmStreaming*': [SKIP],
+  'test-backing-store/Run_WasmModule_Buffer_Externalized_Regression_UseAfterFree': [SKIP],
   'test-c-wasm-entry/*': [SKIP],
   'test-jump-table-assembler/*': [SKIP],
+  'test-grow-memory/*': [SKIP],
   'test-run-wasm-64/*': [SKIP],
   'test-run-wasm-asmjs/*': [SKIP],
   'test-run-wasm-atomics64/*': [SKIP],

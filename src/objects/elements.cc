@@ -4,10 +4,10 @@
 
 #include "src/objects/elements.h"
 
+#include "src/common/message-template.h"
 #include "src/execution/arguments.h"
 #include "src/execution/frames.h"
 #include "src/execution/isolate-inl.h"
-#include "src/execution/message-template.h"
 #include "src/heap/factory.h"
 #include "src/heap/heap-inl.h"  // For MaxNumberToStringCacheSize.
 #include "src/heap/heap-write-barrier-inl.h"
@@ -2901,7 +2901,7 @@ class TypedElementsAccessor
       // fields (external pointers, doubles and BigInt data) are only
       // kTaggedSize aligned so we have to use unaligned pointer friendly way of
       // accessing them in order to avoid undefined behavior in C++ code.
-      WriteUnalignedValue<ElementType>(
+      base::WriteUnalignedValue<ElementType>(
           reinterpret_cast<Address>(data_ptr + entry), value);
     } else {
       data_ptr[entry] = value;
@@ -2941,7 +2941,7 @@ class TypedElementsAccessor
       // fields (external pointers, doubles and BigInt data) are only
       // kTaggedSize aligned so we have to use unaligned pointer friendly way of
       // accessing them in order to avoid undefined behavior in C++ code.
-      result = ReadUnalignedValue<ElementType>(
+      result = base::ReadUnalignedValue<ElementType>(
           reinterpret_cast<Address>(data_ptr + entry));
     } else {
       result = data_ptr[entry];
@@ -4492,8 +4492,8 @@ class StringWrapperElementsAccessor
 
  private:
   static String GetString(JSObject holder) {
-    DCHECK(holder.IsJSValue());
-    JSValue js_value = JSValue::cast(holder);
+    DCHECK(holder.IsJSPrimitiveWrapper());
+    JSPrimitiveWrapper js_value = JSPrimitiveWrapper::cast(holder);
     DCHECK(js_value.value().IsString());
     return String::cast(js_value.value());
   }

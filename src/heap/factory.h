@@ -37,7 +37,6 @@ class ArrayBoilerplateDescription;
 class CoverageInfo;
 class DebugInfo;
 class EnumCache;
-class FinalizationGroupCleanupJobTask;
 class FreshlyAllocatedBigInt;
 class Isolate;
 class JSArrayBufferView;
@@ -53,16 +52,18 @@ class JSSetIterator;
 class JSTypedArray;
 class JSWeakMap;
 class LoadHandler;
-class ModuleInfo;
 class NativeContext;
 class NewFunctionArgs;
 class PreparseData;
 class PromiseResolveThenableJobTask;
 class RegExpMatchInfo;
 class ScriptContextTable;
+class SourceTextModule;
+class SourceTextModuleInfo;
 class StackFrameInfo;
 class StackTraceFrame;
 class StoreHandler;
+class SyntheticModule;
 class TemplateObjectDescription;
 class UncompiledDataWithoutPreparseData;
 class UncompiledDataWithPreparseData;
@@ -73,7 +74,8 @@ class WeakCell;
 struct SourceRange;
 template <typename T>
 class ZoneVector;
-enum class SharedFlag : uint32_t;
+enum class SharedFlag : uint8_t;
+enum class InitializedFlag : uint8_t;
 
 enum FunctionMode {
   kWithNameBit = 1 << 0,
@@ -406,7 +408,7 @@ class V8_EXPORT_PRIVATE Factory {
   Handle<ScriptContextTable> NewScriptContextTable();
 
   // Create a module context.
-  Handle<Context> NewModuleContext(Handle<Module> module,
+  Handle<Context> NewModuleContext(Handle<SourceTextModule> module,
                                    Handle<NativeContext> outer,
                                    Handle<ScopeInfo> scope_info);
 
@@ -476,8 +478,6 @@ class V8_EXPORT_PRIVATE Factory {
   Handle<PromiseResolveThenableJobTask> NewPromiseResolveThenableJobTask(
       Handle<JSPromise> promise_to_resolve, Handle<JSReceiver> then,
       Handle<JSReceiver> thenable, Handle<Context> context);
-  Handle<FinalizationGroupCleanupJobTask> NewFinalizationGroupCleanupJobTask(
-      Handle<JSFinalizationGroup> finalization_group);
 
   // Foreign objects are pretenured when allocated by the bootstrapper.
   Handle<Foreign> NewForeign(
@@ -519,8 +519,9 @@ class V8_EXPORT_PRIVATE Factory {
 
   // Allocate a block of memory of the given AllocationType (filled with a
   // filler). Used as a fall-back for generated code when the space is full.
-  Handle<HeapObject> NewFillerObject(int size, bool double_align,
-                                     AllocationType allocation);
+  Handle<HeapObject> NewFillerObject(
+      int size, bool double_align, AllocationType allocation,
+      AllocationOrigin origin = AllocationOrigin::kRuntime);
 
   Handle<JSObject> NewFunctionPrototype(Handle<JSFunction> function);
 
@@ -688,10 +689,20 @@ class V8_EXPORT_PRIVATE Factory {
 
   Handle<JSModuleNamespace> NewJSModuleNamespace();
 
-  Handle<Module> NewModule(Handle<SharedFunctionInfo> code);
+  Handle<SourceTextModule> NewSourceTextModule(Handle<SharedFunctionInfo> code);
+  Handle<SyntheticModule> NewSyntheticModule(
+      Handle<String> module_name, Handle<FixedArray> export_names,
+      v8::Module::SyntheticModuleEvaluationSteps evaluation_steps);
 
   Handle<JSArrayBuffer> NewJSArrayBuffer(
-      SharedFlag shared, AllocationType allocation = AllocationType::kYoung);
+      AllocationType allocation = AllocationType::kYoung);
+
+  MaybeHandle<JSArrayBuffer> NewJSArrayBufferAndBackingStore(
+      size_t byte_length, InitializedFlag initialized,
+      AllocationType allocation = AllocationType::kYoung);
+
+  Handle<JSArrayBuffer> NewJSSharedArrayBuffer(
+      AllocationType allocation = AllocationType::kYoung);
 
   static void TypeAndSizeForElementsKind(ElementsKind kind,
                                          ExternalArrayType* array_type,
@@ -768,19 +779,18 @@ class V8_EXPORT_PRIVATE Factory {
   // Create a serialized scope info.
   Handle<ScopeInfo> NewScopeInfo(int length);
 
-  Handle<ModuleInfo> NewModuleInfo();
+  Handle<SourceTextModuleInfo> NewSourceTextModuleInfo();
 
   Handle<PreparseData> NewPreparseData(int data_length, int children_length);
 
   Handle<UncompiledDataWithoutPreparseData>
   NewUncompiledDataWithoutPreparseData(Handle<String> inferred_name,
                                        int32_t start_position,
-                                       int32_t end_position,
-                                       int32_t function_literal_id);
+                                       int32_t end_position);
 
   Handle<UncompiledDataWithPreparseData> NewUncompiledDataWithPreparseData(
       Handle<String> inferred_name, int32_t start_position,
-      int32_t end_position, int32_t function_literal_id, Handle<PreparseData>);
+      int32_t end_position, Handle<PreparseData>);
 
   // Create an External object for V8's external API.
   Handle<JSObject> NewExternal(void* value);
@@ -1083,10 +1093,19 @@ class V8_EXPORT_PRIVATE Factory {
   Handle<String> NumberToStringCacheSet(Handle<Object> number, int hash,
                                         const char* string, bool check_cache);
 
-  // Create a JSArray with no elements and no length.
-  Handle<JSArray> NewJSArray(
-      ElementsKind elements_kind,
+  // Creates a new JSArray with the given backing storage. Performs no
+  // verification of the backing storage because it may not yet be filled.
+  Handle<JSArray> NewJSArrayWithUnverifiedElements(
+      Handle<FixedArrayBase> elements, ElementsKind elements_kind, int length,
       AllocationType allocation = AllocationType::kYoung);
+
+  // Creates the backing storage for a JSArray. This handle must be discarded
+  // before returning the JSArray reference to code outside Factory, which might
+  // decide to left-trim the backing store. To avoid unnecessary HandleScopes,
+  // this method requires capacity greater than zero.
+  Handle<FixedArrayBase> NewJSArrayStorage(
+      ElementsKind elements_kind, int capacity,
+      ArrayStorageAllocationMode mode = DONT_INITIALIZE_ARRAY_ELEMENTS);
 
   Handle<SharedFunctionInfo> NewSharedFunctionInfo(
       MaybeHandle<String> name, MaybeHandle<HeapObject> maybe_function_data,

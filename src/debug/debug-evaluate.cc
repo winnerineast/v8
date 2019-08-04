@@ -51,7 +51,7 @@ MaybeHandle<Object> DebugEvaluate::Global(Isolate* isolate,
 }
 
 MaybeHandle<Object> DebugEvaluate::Local(Isolate* isolate,
-                                         StackFrame::Id frame_id,
+                                         StackFrameId frame_id,
                                          int inlined_jsframe_index,
                                          Handle<String> source,
                                          bool throw_on_side_effect) {
@@ -772,6 +772,8 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtins::Name id) {
     case Builtins::kStrictPoisonPillThrower:
     case Builtins::kAllocateInYoungGeneration:
     case Builtins::kAllocateInOldGeneration:
+    case Builtins::kAllocateRegularInYoungGeneration:
+    case Builtins::kAllocateRegularInOldGeneration:
       return DebugInfo::kHasNoSideEffect;
 
     // Set builtins.
@@ -905,7 +907,7 @@ static bool TransitivelyCalledBuiltinHasNoSideEffect(Builtins::Name caller,
   switch (callee) {
       // Transitively called Builtins:
     case Builtins::kAbort:
-    case Builtins::kAbortJS:
+    case Builtins::kAbortCSAAssert:
     case Builtins::kAdaptorWithBuiltinExitFrame:
     case Builtins::kArrayConstructorImpl:
     case Builtins::kArrayEveryLoopContinuation:
@@ -961,6 +963,7 @@ static bool TransitivelyCalledBuiltinHasNoSideEffect(Builtins::Name caller,
     case Builtins::kParseInt:
     case Builtins::kProxyHasProperty:
     case Builtins::kProxyIsExtensible:
+    case Builtins::kProxyGetPrototypeOf:
     case Builtins::kRecordWrite:
     case Builtins::kStringAdd_CheckNone:
     case Builtins::kStringEqual:

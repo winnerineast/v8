@@ -173,9 +173,9 @@ void InstructionSelector::VisitStackSlot(Node* node) {
        sequence()->AddImmediate(Constant(slot)), 0, nullptr);
 }
 
-void InstructionSelector::VisitDebugAbort(Node* node) {
+void InstructionSelector::VisitAbortCSAAssert(Node* node) {
   PPCOperandGenerator g(this);
-  Emit(kArchDebugAbort, g.NoOutput(), g.UseFixed(node->InputAt(0), r4));
+  Emit(kArchAbortCSAAssert, g.NoOutput(), g.UseFixed(node->InputAt(0), r4));
 }
 
 void InstructionSelector::VisitLoad(Node* node) {
@@ -267,7 +267,8 @@ void InstructionSelector::VisitStore(Node* node) {
     rep = store_rep.representation();
   }
 
-  if (write_barrier_kind != kNoWriteBarrier) {
+  if (write_barrier_kind != kNoWriteBarrier &&
+      V8_LIKELY(!FLAG_disable_write_barriers)) {
     DCHECK(CanBeTaggedPointer(rep));
     AddressingMode addressing_mode;
     InstructionOperand inputs[3];
@@ -1851,6 +1852,11 @@ void InstructionSelector::VisitFloat64InsertHighWord32(Node* node) {
   }
   Emit(kPPC_DoubleInsertHighWord32, g.DefineSameAsFirst(node),
        g.UseRegister(left), g.UseRegister(right));
+}
+
+void InstructionSelector::VisitMemoryBarrier(Node* node) {
+  PPCOperandGenerator g(this);
+  Emit(kPPC_Sync, g.NoOutput());
 }
 
 void InstructionSelector::VisitWord32AtomicLoad(Node* node) { VisitLoad(node); }

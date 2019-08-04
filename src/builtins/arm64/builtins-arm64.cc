@@ -24,6 +24,10 @@
 #include "src/runtime/runtime.h"
 #include "src/wasm/wasm-objects.h"
 
+#if defined(V8_OS_WIN)
+#include "src/diagnostics/unwinding-info-win64.h"
+#endif  // V8_OS_WIN
+
 namespace v8 {
 namespace internal {
 
@@ -622,6 +626,23 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
     // Enable instruction instrumentation. This only works on the simulator, and
     // will have no effect on the model or real hardware.
     __ EnableInstrumentation();
+
+#if defined(V8_OS_WIN)
+    // Windows ARM64 relies on a frame pointer (fp/x29 which are aliases to each
+    // other) chain to do stack unwinding, but JSEntry breaks that by setting fp
+    // to point to bad_frame_pointer below. To fix unwind information for this
+    // case, JSEntry registers the offset (from current fp to the caller's fp
+    // saved by PushCalleeSavedRegisters on stack) to xdata_encoder which then
+    // emits the offset value as part of result unwind data accordingly. The
+    // current offset is kFramePointerOffset which includes bad_frame_pointer
+    // saved below plus kFramePointerOffsetInPushCalleeSavedRegisters.
+    const int kFramePointerOffset =
+        kFramePointerOffsetInPushCalleeSavedRegisters + kSystemPointerSize;
+    win64_unwindinfo::XdataEncoder* xdata_encoder = masm->GetXdataEncoder();
+    if (xdata_encoder) {
+      xdata_encoder->onFramePointerAdjustment(kFramePointerOffset);
+    }
+#endif
 
     __ PushCalleeSavedRegisters();
 
@@ -1683,18 +1704,20 @@ void Generate_ContinueToBuiltinHelper(MacroAssembler* masm,
 
   if (java_script_builtin) __ SmiUntag(kJavaScriptCallArgCountRegister);
 
-  // Load builtin object.
+  // Load builtin index (stored as a Smi) and use it to get the builtin start
+  // address from the builtins table.
   UseScratchRegisterScope temps(masm);
   Register builtin = temps.AcquireX();
-  __ Ldr(builtin,
-         MemOperand(fp, BuiltinContinuationFrameConstants::kBuiltinOffset));
+  __ Ldr(
+      builtin,
+      MemOperand(fp, BuiltinContinuationFrameConstants::kBuiltinIndexOffset));
 
   // Restore fp, lr.
   __ Mov(sp, fp);
   __ Pop(fp, lr);
 
-  // Call builtin.
-  __ JumpCodeObject(builtin);
+  __ LoadEntryFromBuiltinIndex(builtin);
+  __ Jump(builtin);
 }
 }  // namespace
 
@@ -3029,9 +3052,12 @@ void Builtins::Generate_WasmCompileLazy(MacroAssembler* masm) {
     // function.
     __ Push(kWasmInstanceRegister, kWasmCompileLazyFuncIndexRegister);
     // Load the correct CEntry builtin from the instance object.
+    __ Ldr(x2, FieldMemOperand(kWasmInstanceRegister,
+                               WasmInstanceObject::kIsolateRootOffset));
+    auto centry_id =
+        Builtins::kCEntry_Return1_DontSaveFPRegs_ArgvOnStack_NoBuiltinExit;
     __ LoadTaggedPointerField(
-        x2, FieldMemOperand(kWasmInstanceRegister,
-                            WasmInstanceObject::kCEntryStubOffset));
+        x2, MemOperand(x2, IsolateData::builtin_slot_offset(centry_id)));
     // Initialize the JavaScript context with 0. CEntry will use it to
     // set the current context on the isolate.
     __ Mov(cp, Smi::zero());
@@ -3405,7 +3431,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
   __ Ldrb(w10, MemOperand(x10));
   __ Cbnz(w10, &profiler_enabled);
   __ Mov(x10, ExternalReference::address_of_runtime_stats_flag());
-  __ Ldrb(w10, MemOperand(x10));
+  __ Ldrsw(w10, MemOperand(x10));
   __ Cbnz(w10, &profiler_enabled);
   {
     // Call the api function directly.

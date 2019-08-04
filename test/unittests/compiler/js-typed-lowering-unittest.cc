@@ -47,16 +47,9 @@ class JSTypedLoweringTest : public TypedGraphTest {
     JSGraph jsgraph(isolate(), graph(), common(), javascript(), &simplified,
                     &machine);
     // TODO(titzer): mock the GraphReducer here for better unit testing.
-    GraphReducer graph_reducer(zone(), graph());
+    GraphReducer graph_reducer(zone(), graph(), tick_counter());
     JSTypedLowering reducer(&graph_reducer, &jsgraph, broker(), zone());
     return reducer.Reduce(node);
-  }
-
-  Handle<JSArrayBuffer> NewArrayBuffer(void* bytes, size_t byte_length) {
-    Handle<JSArrayBuffer> buffer =
-        factory()->NewJSArrayBuffer(SharedFlag::kNotShared);
-    JSArrayBuffer::Setup(buffer, isolate(), true, bytes, byte_length);
-    return buffer;
   }
 
   JSOperatorBuilder* javascript() { return &javascript_; }

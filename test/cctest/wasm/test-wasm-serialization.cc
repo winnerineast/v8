@@ -11,7 +11,6 @@
 #include "src/utils/version.h"
 #include "src/wasm/module-decoder.h"
 #include "src/wasm/wasm-engine.h"
-#include "src/wasm/wasm-memory.h"
 #include "src/wasm/wasm-module-builder.h"
 #include "src/wasm/wasm-module.h"
 #include "src/wasm/wasm-objects-inl.h"
@@ -61,7 +60,7 @@ class WasmSerializationTest {
     EMIT_CODE_WITH_END(f, code);
     builder->AddExport(CStrVector(kFunctionName), f);
 
-    builder->WriteTo(*buffer);
+    builder->WriteTo(buffer);
   }
 
   void ClearSerializedData() { serialized_bytes_ = {nullptr, 0}; }

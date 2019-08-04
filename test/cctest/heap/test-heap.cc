@@ -56,7 +56,7 @@
 #include "src/objects/objects-inl.h"
 #include "src/objects/slots.h"
 #include "src/objects/transitions.h"
-#include "src/regexp/jsregexp.h"
+#include "src/regexp/regexp.h"
 #include "src/snapshot/snapshot.h"
 #include "src/utils/ostreams.h"
 #include "test/cctest/cctest.h"
@@ -1068,7 +1068,7 @@ TEST(StringAllocation) {
 static int ObjectsFoundInHeap(Heap* heap, Handle<Object> objs[], int size) {
   // Count the number of objects found in the heap.
   int found_count = 0;
-  HeapIterator iterator(heap);
+  HeapObjectIterator iterator(heap);
   for (HeapObject obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
     for (int i = 0; i < size; i++) {
@@ -1510,8 +1510,8 @@ TEST(TestSizeOfRegExpCode) {
   LocalContext context;
 
   // Adjust source below and this check to match
-  // RegExpImple::kRegExpTooLargeToOptimize.
-  CHECK_EQ(i::RegExpImpl::kRegExpTooLargeToOptimize, 20 * KB);
+  // RegExp::kRegExpTooLargeToOptimize.
+  CHECK_EQ(i::RegExp::kRegExpTooLargeToOptimize, 20 * KB);
 
   // Compile a regexp that is much larger if we are using regexp optimizations.
   CompileRun(
@@ -1829,9 +1829,9 @@ TEST(MutableHeapNumberAlignment) {
   }
 }
 
-TEST(TestSizeOfObjectsVsHeapIteratorPrecision) {
+TEST(TestSizeOfObjectsVsHeapObjectIteratorPrecision) {
   CcTest::InitializeVM();
-  HeapIterator iterator(CcTest::heap());
+  HeapObjectIterator iterator(CcTest::heap());
   intptr_t size_of_objects_1 = CcTest::heap()->SizeOfObjects();
   intptr_t size_of_objects_2 = 0;
   for (HeapObject obj = iterator.Next(); !obj.is_null();
@@ -1948,7 +1948,7 @@ TEST(CollectingAllAvailableGarbageShrinksNewSpace) {
 
 static int NumberOfGlobalObjects() {
   int count = 0;
-  HeapIterator iterator(CcTest::heap());
+  HeapObjectIterator iterator(CcTest::heap());
   for (HeapObject obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
     if (obj.IsJSGlobalObject()) count++;
@@ -2275,7 +2275,7 @@ HEAP_TEST(Regress845060) {
   // Run the test (which allocates results) until the original string was
   // promoted to old space. Unmapping of from_space causes accesses to any
   // stale raw pointers to crash.
-  CompileRun("while (%InNewSpace(str)) { str.split(''); }");
+  CompileRun("while (%InYoungGeneration(str)) { str.split(''); }");
   CHECK(!Heap::InYoungGeneration(*v8::Utils::OpenHandle(*str)));
 }
 
@@ -4864,7 +4864,8 @@ TEST(Regress507979) {
   CHECK(Heap::InYoungGeneration(*o1));
   CHECK(Heap::InYoungGeneration(*o2));
 
-  HeapIterator it(isolate->heap(), i::HeapIterator::kFilterUnreachable);
+  HeapObjectIterator it(isolate->heap(),
+                        i::HeapObjectIterator::kFilterUnreachable);
 
   // Replace parts of an object placed before a live object with a filler. This
   // way the filler object shares the mark bits with the following live object.
@@ -5281,7 +5282,7 @@ TEST(ScriptIterator) {
 
   int script_count = 0;
   {
-    HeapIterator it(heap);
+    HeapObjectIterator it(heap);
     for (HeapObject obj = it.Next(); !obj.is_null(); obj = it.Next()) {
       if (obj.IsScript()) script_count++;
     }
@@ -5311,7 +5312,7 @@ TEST(SharedFunctionInfoIterator) {
 
   int sfi_count = 0;
   {
-    HeapIterator it(heap);
+    HeapObjectIterator it(heap);
     for (HeapObject obj = it.Next(); !obj.is_null(); obj = it.Next()) {
       if (!obj.IsSharedFunctionInfo()) continue;
       sfi_count++;

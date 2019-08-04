@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/common/message-template.h"
 #include "src/debug/debug.h"
 #include "src/execution/arguments-inl.h"
 #include "src/execution/isolate-inl.h"
-#include "src/execution/message-template.h"
 #include "src/heap/heap-inl.h"  // For ToBoolean. TODO(jkummerow): Drop.
 #include "src/init/bootstrapper.h"
 #include "src/logging/counters.h"
@@ -217,6 +217,8 @@ RUNTIME_FUNCTION(Runtime_ObjectGetOwnPropertyNames) {
                                      Object::ToObject(isolate, object));
 
   // Collect the own keys for the {receiver}.
+  // TODO(v8:9401): We should extend the fast path of KeyAccumulator::GetKeys to
+  // also use fast path even when filter = SKIP_SYMBOLS.
   Handle<FixedArray> keys;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, keys,
@@ -533,6 +535,41 @@ RUNTIME_FUNCTION(Runtime_JSReceiverPreventExtensionsDontThrow) {
 
   Maybe<bool> result = JSReceiver::PreventExtensions(
       Handle<JSReceiver>::cast(object), kDontThrow);
+  MAYBE_RETURN(result, ReadOnlyRoots(isolate).exception());
+  return *isolate->factory()->ToBoolean(result.FromJust());
+}
+
+RUNTIME_FUNCTION(Runtime_JSReceiverGetPrototypeOf) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(1, args.length());
+  CONVERT_ARG_HANDLE_CHECKED(JSReceiver, receiver, 0);
+
+  RETURN_RESULT_OR_FAILURE(isolate,
+                           JSReceiver::GetPrototype(isolate, receiver));
+}
+
+RUNTIME_FUNCTION(Runtime_JSReceiverSetPrototypeOfThrow) {
+  HandleScope scope(isolate);
+
+  DCHECK_EQ(2, args.length());
+  CONVERT_ARG_HANDLE_CHECKED(JSReceiver, object, 0);
+  CONVERT_ARG_HANDLE_CHECKED(Object, proto, 1);
+
+  MAYBE_RETURN(JSReceiver::SetPrototype(object, proto, true, kThrowOnError),
+               ReadOnlyRoots(isolate).exception());
+
+  return *object;
+}
+
+RUNTIME_FUNCTION(Runtime_JSReceiverSetPrototypeOfDontThrow) {
+  HandleScope scope(isolate);
+
+  DCHECK_EQ(2, args.length());
+  CONVERT_ARG_HANDLE_CHECKED(JSReceiver, object, 0);
+  CONVERT_ARG_HANDLE_CHECKED(Object, proto, 1);
+
+  Maybe<bool> result =
+      JSReceiver::SetPrototype(object, proto, true, kDontThrow);
   MAYBE_RETURN(result, ReadOnlyRoots(isolate).exception());
   return *isolate->factory()->ToBoolean(result.FromJust());
 }

@@ -66,7 +66,6 @@
   V(ObjectId)                     \
   V(TypedObjectState)             \
   V(Call)                         \
-  V(CallWithCallerSavedRegisters) \
   V(Parameter)                    \
   V(OsrValue)                     \
   V(LoopExit)                     \
@@ -232,6 +231,7 @@
 
 // Opcodes for VirtuaMachine-level operators.
 #define SIMPLIFIED_CHANGE_OP_LIST(V) \
+  V(ChangeCompressedSignedToInt32)   \
   V(ChangeTaggedSignedToInt32)       \
   V(ChangeTaggedSignedToInt64)       \
   V(ChangeTaggedToInt32)             \
@@ -241,6 +241,7 @@
   V(ChangeTaggedToTaggedSigned)      \
   V(ChangeCompressedToTaggedSigned)  \
   V(ChangeTaggedToCompressedSigned)  \
+  V(ChangeInt31ToCompressedSigned)   \
   V(ChangeInt31ToTaggedSigned)       \
   V(ChangeInt32ToTagged)             \
   V(ChangeInt64ToTagged)             \
@@ -250,6 +251,8 @@
   V(ChangeFloat64ToTaggedPointer)    \
   V(ChangeTaggedToBit)               \
   V(ChangeBitToTagged)               \
+  V(ChangeUint64ToBigInt)            \
+  V(TruncateBigIntToUint64)          \
   V(TruncateTaggedToWord32)          \
   V(TruncateTaggedToFloat64)         \
   V(TruncateTaggedToBit)             \
@@ -263,6 +266,7 @@
   V(CheckedUint32Div)                 \
   V(CheckedUint32Mod)                 \
   V(CheckedInt32Mul)                  \
+  V(CheckedInt32ToCompressedSigned)   \
   V(CheckedInt32ToTaggedSigned)       \
   V(CheckedInt64ToInt32)              \
   V(CheckedInt64ToTaggedSigned)       \
@@ -319,6 +323,8 @@
   V(NumberMin)                          \
   V(NumberPow)
 
+#define SIMPLIFIED_BIGINT_BINOP_LIST(V) V(BigIntAdd)
+
 #define SIMPLIFIED_SPECULATIVE_NUMBER_BINOP_LIST(V) \
   V(SpeculativeNumberAdd)                           \
   V(SpeculativeNumberSubtract)                      \
@@ -370,6 +376,11 @@
   V(NumberToUint8Clamped)              \
   V(NumberSilenceNaN)
 
+#define SIMPLIFIED_BIGINT_UNOP_LIST(V) \
+  V(BigIntAsUintN)                     \
+  V(BigIntNegate)                      \
+  V(CheckBigInt)
+
 #define SIMPLIFIED_SPECULATIVE_NUMBER_UNOP_LIST(V) V(SpeculativeToNumber)
 
 #define SIMPLIFIED_OTHER_OP_LIST(V)     \
@@ -383,6 +394,7 @@
   V(StringCodePointAt)                  \
   V(StringFromSingleCharCode)           \
   V(StringFromSingleCodePoint)          \
+  V(StringFromCodePointAt)              \
   V(StringIndexOf)                      \
   V(StringLength)                       \
   V(StringToLowerCaseIntl)              \
@@ -462,16 +474,24 @@
   V(FindOrderedHashMapEntryForInt32Key) \
   V(PoisonIndex)                        \
   V(RuntimeAbort)                       \
+  V(AssertType)                         \
   V(DateNow)
+
+#define SIMPLIFIED_SPECULATIVE_BIGINT_BINOP_LIST(V) V(SpeculativeBigIntAdd)
+#define SIMPLIFIED_SPECULATIVE_BIGINT_UNOP_LIST(V) V(SpeculativeBigIntNegate)
 
 #define SIMPLIFIED_OP_LIST(V)                 \
   SIMPLIFIED_CHANGE_OP_LIST(V)                \
   SIMPLIFIED_CHECKED_OP_LIST(V)               \
   SIMPLIFIED_COMPARE_BINOP_LIST(V)            \
   SIMPLIFIED_NUMBER_BINOP_LIST(V)             \
+  SIMPLIFIED_BIGINT_BINOP_LIST(V)             \
   SIMPLIFIED_SPECULATIVE_NUMBER_BINOP_LIST(V) \
   SIMPLIFIED_NUMBER_UNOP_LIST(V)              \
+  SIMPLIFIED_BIGINT_UNOP_LIST(V)              \
   SIMPLIFIED_SPECULATIVE_NUMBER_UNOP_LIST(V)  \
+  SIMPLIFIED_SPECULATIVE_BIGINT_UNOP_LIST(V)  \
+  SIMPLIFIED_SPECULATIVE_BIGINT_BINOP_LIST(V) \
   SIMPLIFIED_OTHER_OP_LIST(V)
 
 // Opcodes for Machine-level operators.
@@ -596,15 +616,33 @@
   V(Float64Mod)                       \
   V(Float64Pow)
 
-#define MACHINE_WORD64_ATOMIC_OP_LIST(V) \
-  V(Word64AtomicLoad)                    \
-  V(Word64AtomicStore)                   \
-  V(Word64AtomicAdd)                     \
-  V(Word64AtomicSub)                     \
-  V(Word64AtomicAnd)                     \
-  V(Word64AtomicOr)                      \
-  V(Word64AtomicXor)                     \
-  V(Word64AtomicExchange)                \
+#define MACHINE_ATOMIC_OP_LIST(V)    \
+  V(Word32AtomicLoad)                \
+  V(Word32AtomicStore)               \
+  V(Word32AtomicExchange)            \
+  V(Word32AtomicCompareExchange)     \
+  V(Word32AtomicAdd)                 \
+  V(Word32AtomicSub)                 \
+  V(Word32AtomicAnd)                 \
+  V(Word32AtomicOr)                  \
+  V(Word32AtomicXor)                 \
+  V(Word32AtomicPairLoad)            \
+  V(Word32AtomicPairStore)           \
+  V(Word32AtomicPairAdd)             \
+  V(Word32AtomicPairSub)             \
+  V(Word32AtomicPairAnd)             \
+  V(Word32AtomicPairOr)              \
+  V(Word32AtomicPairXor)             \
+  V(Word32AtomicPairExchange)        \
+  V(Word32AtomicPairCompareExchange) \
+  V(Word64AtomicLoad)                \
+  V(Word64AtomicStore)               \
+  V(Word64AtomicAdd)                 \
+  V(Word64AtomicSub)                 \
+  V(Word64AtomicAnd)                 \
+  V(Word64AtomicOr)                  \
+  V(Word64AtomicXor)                 \
+  V(Word64AtomicExchange)            \
   V(Word64AtomicCompareExchange)
 
 #define MACHINE_OP_LIST(V)                  \
@@ -616,8 +654,8 @@
   MACHINE_FLOAT32_UNOP_LIST(V)              \
   MACHINE_FLOAT64_BINOP_LIST(V)             \
   MACHINE_FLOAT64_UNOP_LIST(V)              \
-  MACHINE_WORD64_ATOMIC_OP_LIST(V)          \
-  V(DebugAbort)                             \
+  MACHINE_ATOMIC_OP_LIST(V)                 \
+  V(AbortCSAAssert)                         \
   V(DebugBreak)                             \
   V(Comment)                                \
   V(Load)                                   \
@@ -694,24 +732,7 @@
   V(Word32PairSar)                          \
   V(ProtectedLoad)                          \
   V(ProtectedStore)                         \
-  V(Word32AtomicLoad)                       \
-  V(Word32AtomicStore)                      \
-  V(Word32AtomicExchange)                   \
-  V(Word32AtomicCompareExchange)            \
-  V(Word32AtomicAdd)                        \
-  V(Word32AtomicSub)                        \
-  V(Word32AtomicAnd)                        \
-  V(Word32AtomicOr)                         \
-  V(Word32AtomicXor)                        \
-  V(Word32AtomicPairLoad)                   \
-  V(Word32AtomicPairStore)                  \
-  V(Word32AtomicPairAdd)                    \
-  V(Word32AtomicPairSub)                    \
-  V(Word32AtomicPairAnd)                    \
-  V(Word32AtomicPairOr)                     \
-  V(Word32AtomicPairXor)                    \
-  V(Word32AtomicPairExchange)               \
-  V(Word32AtomicPairCompareExchange)        \
+  V(MemoryBarrier)                          \
   V(SignExtendWord8ToInt32)                 \
   V(SignExtendWord16ToInt32)                \
   V(SignExtendWord8ToInt64)                 \
@@ -720,6 +741,20 @@
   V(UnsafePointerAdd)
 
 #define MACHINE_SIMD_OP_LIST(V) \
+  V(F64x2Splat)                 \
+  V(F64x2ExtractLane)           \
+  V(F64x2ReplaceLane)           \
+  V(F64x2Abs)                   \
+  V(F64x2Neg)                   \
+  V(F64x2Add)                   \
+  V(F64x2Sub)                   \
+  V(F64x2Mul)                   \
+  V(F64x2Min)                   \
+  V(F64x2Max)                   \
+  V(F64x2Eq)                    \
+  V(F64x2Ne)                    \
+  V(F64x2Lt)                    \
+  V(F64x2Le)                    \
   V(F32x4Splat)                 \
   V(F32x4ExtractLane)           \
   V(F32x4ReplaceLane)           \
@@ -741,6 +776,26 @@
   V(F32x4Le)                    \
   V(F32x4Gt)                    \
   V(F32x4Ge)                    \
+  V(I64x2Splat)                 \
+  V(I64x2ExtractLane)           \
+  V(I64x2ReplaceLane)           \
+  V(I64x2Neg)                   \
+  V(I64x2Shl)                   \
+  V(I64x2ShrS)                  \
+  V(I64x2Add)                   \
+  V(I64x2Sub)                   \
+  V(I64x2Mul)                   \
+  V(I64x2MinS)                  \
+  V(I64x2MaxS)                  \
+  V(I64x2Eq)                    \
+  V(I64x2Ne)                    \
+  V(I64x2GtS)                   \
+  V(I64x2GeS)                   \
+  V(I64x2ShrU)                  \
+  V(I64x2MinU)                  \
+  V(I64x2MaxU)                  \
+  V(I64x2GtU)                   \
+  V(I64x2GeU)                   \
   V(I32x4Splat)                 \
   V(I32x4ExtractLane)           \
   V(I32x4ReplaceLane)           \
@@ -846,6 +901,8 @@
   V(S128Xor)                    \
   V(S128Select)                 \
   V(S8x16Shuffle)               \
+  V(S1x2AnyTrue)                \
+  V(S1x2AllTrue)                \
   V(S1x4AnyTrue)                \
   V(S1x4AllTrue)                \
   V(S1x8AnyTrue)                \

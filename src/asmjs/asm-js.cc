@@ -12,9 +12,9 @@
 #include "src/codegen/compiler.h"
 #include "src/codegen/unoptimized-compilation-info.h"
 #include "src/common/assert-scope.h"
+#include "src/common/message-template.h"
 #include "src/execution/execution.h"
 #include "src/execution/isolate.h"
-#include "src/execution/message-template.h"
 #include "src/handles/handles.h"
 #include "src/heap/factory.h"
 #include "src/logging/counters.h"
@@ -249,9 +249,9 @@ UnoptimizedCompilationJob::Status AsmJsCompilationJob::ExecuteJobImpl() {
     return FAILED;
   }
   module_ = new (compile_zone) wasm::ZoneBuffer(compile_zone);
-  parser.module_builder()->WriteTo(*module_);
+  parser.module_builder()->WriteTo(module_);
   asm_offsets_ = new (compile_zone) wasm::ZoneBuffer(compile_zone);
-  parser.module_builder()->WriteAsmJsOffsetTable(*asm_offsets_);
+  parser.module_builder()->WriteAsmJsOffsetTable(asm_offsets_);
   stdlib_uses_ = *parser.stdlib_uses();
 
   size_t compile_zone_size =
@@ -287,7 +287,7 @@ UnoptimizedCompilationJob::Status AsmJsCompilationJob::FinalizeJobImpl(
               isolate, &thrower,
               wasm::ModuleWireBytes(module_->begin(), module_->end()),
               Vector<const byte>(asm_offsets_->begin(), asm_offsets_->size()),
-              uses_bitset)
+              uses_bitset, shared_info->language_mode())
           .ToHandleChecked();
   DCHECK(!thrower.error());
   compile_time_ = compile_timer.Elapsed().InMillisecondsF();
@@ -319,10 +319,10 @@ void AsmJsCompilationJob::RecordHistograms(Isolate* isolate) {
       translation_throughput);
 }
 
-UnoptimizedCompilationJob* AsmJs::NewCompilationJob(
+std::unique_ptr<UnoptimizedCompilationJob> AsmJs::NewCompilationJob(
     ParseInfo* parse_info, FunctionLiteral* literal,
     AccountingAllocator* allocator) {
-  return new AsmJsCompilationJob(parse_info, literal, allocator);
+  return base::make_unique<AsmJsCompilationJob>(parse_info, literal, allocator);
 }
 
 namespace {
@@ -387,7 +387,12 @@ MaybeHandle<Object> AsmJs::InstantiateAsmWasm(Isolate* isolate,
       ReportInstantiationFailure(script, position, "Requires heap buffer");
       return MaybeHandle<Object>();
     }
-    wasm_engine->memory_tracker()->MarkWasmMemoryNotGrowable(memory);
+    // Mark the buffer as being used as an asm.js memory. This implies two
+    // things: 1) if the buffer is from a Wasm memory, that memory can no longer
+    // be grown, since that would detach this buffer, and 2) the buffer cannot
+    // be postMessage()'d, as that also detaches the buffer.
+    memory->set_is_asmjs_memory(true);
+    memory->set_is_detachable(false);
     size_t size = memory->byte_length();
     // Check the asm.js heap size against the valid limits.
     if (!IsValidAsmjsMemorySize(size)) {

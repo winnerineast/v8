@@ -9,6 +9,7 @@
 
 #include "src/codegen/bailout-reason.h"
 #include "src/codegen/source-position-table.h"
+#include "src/codegen/tick-counter.h"
 #include "src/common/globals.h"
 #include "src/execution/frames.h"
 #include "src/handles/handles.h"
@@ -60,10 +61,11 @@ class V8_EXPORT_PRIVATE OptimizedCompilationInfo final {
     kTraceTurboJson = 1 << 14,
     kTraceTurboGraph = 1 << 15,
     kTraceTurboScheduled = 1 << 16,
-    kTraceHeapBroker = 1 << 17,
-    kWasmRuntimeExceptionSupport = 1 << 18,
-    kTurboControlFlowAwareAllocation = 1 << 19,
-    kTurboPreprocessRanges = 1 << 20
+    kTraceTurboAllocation = 1 << 17,
+    kTraceHeapBroker = 1 << 18,
+    kWasmRuntimeExceptionSupport = 1 << 19,
+    kTurboControlFlowAwareAllocation = 1 << 20,
+    kTurboPreprocessRanges = 1 << 21
   };
 
   // Construct a compilation info for optimized compilation.
@@ -190,6 +192,10 @@ class V8_EXPORT_PRIVATE OptimizedCompilationInfo final {
 
   bool trace_turbo_graph_enabled() const { return GetFlag(kTraceTurboGraph); }
 
+  bool trace_turbo_allocation_enabled() const {
+    return GetFlag(kTraceTurboAllocation);
+  }
+
   bool trace_turbo_scheduled_enabled() const {
     return GetFlag(kTraceTurboScheduled);
   }
@@ -207,7 +213,7 @@ class V8_EXPORT_PRIVATE OptimizedCompilationInfo final {
   Context context() const;
 
   bool has_native_context() const;
-  Context native_context() const;
+  NativeContext native_context() const;
 
   bool has_global_object() const;
   JSGlobalObject global_object() const;
@@ -284,6 +290,8 @@ class V8_EXPORT_PRIVATE OptimizedCompilationInfo final {
 
   std::unique_ptr<v8::tracing::TracedValue> ToTracedValue();
 
+  TickCounter& tick_counter() { return tick_counter_; }
+
  private:
   OptimizedCompilationInfo(Code::Kind code_kind, Zone* zone);
   void ConfigureFlags();
@@ -335,6 +343,8 @@ class V8_EXPORT_PRIVATE OptimizedCompilationInfo final {
 
   Vector<const char> debug_name_;
   std::unique_ptr<char[]> trace_turbo_filename_;
+
+  TickCounter tick_counter_;
 
   DISALLOW_COPY_AND_ASSIGN(OptimizedCompilationInfo);
 };

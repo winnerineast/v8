@@ -29,6 +29,9 @@ class Truncation final {
   static Truncation Word32() {
     return Truncation(TruncationKind::kWord32, kIdentifyZeros);
   }
+  static Truncation Word64() {
+    return Truncation(TruncationKind::kWord64, kIdentifyZeros);
+  }
   static Truncation OddballAndBigIntToNumber(
       IdentifyZeros identify_zeros = kDistinguishZeros) {
     return Truncation(TruncationKind::kOddballAndBigIntToNumber,
@@ -51,6 +54,9 @@ class Truncation final {
   }
   bool IsUsedAsWord32() const {
     return LessGeneral(kind_, TruncationKind::kWord32);
+  }
+  bool IsUsedAsWord64() const {
+    return LessGeneral(kind_, TruncationKind::kWord64);
   }
   bool TruncatesOddballAndBigIntToNumber() const {
     return LessGeneral(kind_, TruncationKind::kOddballAndBigIntToNumber);
@@ -83,6 +89,7 @@ class Truncation final {
     kNone,
     kBool,
     kWord32,
+    kWord64,
     kOddballAndBigIntToNumber,
     kAny
   };
@@ -112,7 +119,8 @@ enum class TypeCheckKind : uint8_t {
   kSigned64,
   kNumber,
   kNumberOrOddball,
-  kHeapObject
+  kHeapObject,
+  kBigInt,
 };
 
 inline std::ostream& operator<<(std::ostream& os, TypeCheckKind type_check) {
@@ -131,6 +139,8 @@ inline std::ostream& operator<<(std::ostream& os, TypeCheckKind type_check) {
       return os << "NumberOrOddball";
     case TypeCheckKind::kHeapObject:
       return os << "HeapObject";
+    case TypeCheckKind::kBigInt:
+      return os << "BigInt";
   }
   UNREACHABLE();
 }
@@ -162,6 +172,13 @@ class UseInfo {
         feedback_(feedback) {}
   static UseInfo TruncatingWord32() {
     return UseInfo(MachineRepresentation::kWord32, Truncation::Word32());
+  }
+  static UseInfo TruncatingWord64() {
+    return UseInfo(MachineRepresentation::kWord64, Truncation::Word64());
+  }
+  static UseInfo CheckedBigIntTruncatingWord64(const VectorSlotPair& feedback) {
+    return UseInfo(MachineRepresentation::kWord64, Truncation::Word64(),
+                   TypeCheckKind::kBigInt, feedback);
   }
   static UseInfo Word64() {
     return UseInfo(MachineRepresentation::kWord64, Truncation::Any());
@@ -206,6 +223,12 @@ class UseInfo {
     return UseInfo(MachineRepresentation::kTaggedPointer, Truncation::Any(),
                    TypeCheckKind::kHeapObject, feedback);
   }
+
+  static UseInfo CheckedBigIntAsTaggedPointer(const VectorSlotPair& feedback) {
+    return UseInfo(MachineRepresentation::kTaggedPointer, Truncation::Any(),
+                   TypeCheckKind::kBigInt, feedback);
+  }
+
   static UseInfo CheckedSignedSmallAsTaggedSigned(
       const VectorSlotPair& feedback,
       IdentifyZeros identify_zeros = kDistinguishZeros) {
@@ -288,7 +311,7 @@ class UseInfo {
 // Eagerly folds any representation changes for constants.
 class V8_EXPORT_PRIVATE RepresentationChanger final {
  public:
-  RepresentationChanger(JSGraph* jsgraph, Isolate* isolate);
+  RepresentationChanger(JSGraph* jsgraph, JSHeapBroker* broker);
 
   // Changes representation from {output_type} to {use_rep}. The {truncation}
   // parameter is only used for sanity checking - if the changer cannot figure
@@ -318,7 +341,7 @@ class V8_EXPORT_PRIVATE RepresentationChanger final {
  private:
   TypeCache const* cache_;
   JSGraph* jsgraph_;
-  Isolate* isolate_;
+  JSHeapBroker* broker_;
 
   friend class RepresentationChangerTester;  // accesses the below fields.
 
@@ -372,12 +395,14 @@ class V8_EXPORT_PRIVATE RepresentationChanger final {
   Node* InsertChangeTaggedSignedToInt32(Node* node);
   Node* InsertChangeTaggedToFloat64(Node* node);
   Node* InsertChangeUint32ToFloat64(Node* node);
+  Node* InsertChangeCompressedPointerToTaggedPointer(Node* node);
+  Node* InsertChangeCompressedToTagged(Node* node);
   Node* InsertConversion(Node* node, const Operator* op, Node* use_node);
   Node* InsertTruncateInt64ToInt32(Node* node);
   Node* InsertUnconditionalDeopt(Node* node, DeoptimizeReason reason);
 
   JSGraph* jsgraph() const { return jsgraph_; }
-  Isolate* isolate() const { return isolate_; }
+  Isolate* isolate() const;
   Factory* factory() const { return isolate()->factory(); }
   SimplifiedOperatorBuilder* simplified() { return jsgraph()->simplified(); }
   MachineOperatorBuilder* machine() { return jsgraph()->machine(); }

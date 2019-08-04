@@ -72,6 +72,7 @@ class StatsCounter;
     "IsolateData::fast_c_call_caller_fp_address")                              \
   V(fast_c_call_caller_pc_address,                                             \
     "IsolateData::fast_c_call_caller_pc_address")                              \
+  V(stack_is_iterable_address, "IsolateData::stack_is_iterable_address")       \
   V(address_of_regexp_stack_limit, "RegExpStack::limit_address()")             \
   V(address_of_regexp_stack_memory_address, "RegExpStack::memory_address()")   \
   V(address_of_regexp_stack_memory_size, "RegExpStack::memory_size()")         \
@@ -81,6 +82,7 @@ class StatsCounter;
   V(re_check_stack_guard_state,                                                \
     "RegExpMacroAssembler*::CheckStackGuardState()")                           \
   V(re_grow_stack, "NativeRegExpMacroAssembler::GrowStack()")                  \
+  V(re_match_for_call_from_js, "IrregexpInterpreter::MatchForCallFromJs")      \
   V(re_word_character_map, "NativeRegExpMacroAssembler::word_character_map")
 
 #define EXTERNAL_REFERENCE_LIST(V)                                            \

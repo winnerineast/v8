@@ -190,13 +190,14 @@ function TestAllScenarios(f) {
       %DeoptimizeFunction(AssignStrict);
       %ClearFunctionFeedback(Assign);
       %ClearFunctionFeedback(AssignStrict);
+      %PrepareFunctionForOptimization(Assign);
+      %PrepareFunctionForOptimization(AssignStrict);
       for (var i = 0; i < t; ++i) {
         var o = create();
         assertFalse("a" in o && !("a" in o.__proto__));
         if (strict === 0)
           Assign(o, i);
         else
-
           AssignStrict(o, i);
         assertEquals(i, o.a);
       }

@@ -156,7 +156,7 @@ bool ContainsUpperCase(const std::string& s) {
 // keywords, e.g.: 'True', 'Undefined', etc.
 // These do not need to follow the default naming convention for constants.
 bool IsKeywordLikeName(const std::string& s) {
-  static const char* const keyword_like_constants[]{"True", "False", "Hole",
+  static const char* const keyword_like_constants[]{"True", "False", "TheHole",
                                                     "Null", "Undefined"};
 
   return std::find(std::begin(keyword_like_constants),
@@ -246,6 +246,19 @@ std::string CamelifyString(const std::string& underscore_string) {
   return result;
 }
 
+std::string SnakeifyString(const std::string& camel_string) {
+  std::string result;
+  bool previousWasLower = false;
+  for (auto current : camel_string) {
+    if (previousWasLower && isupper(current)) {
+      result += "_";
+    }
+    result += tolower(current);
+    previousWasLower = (islower(current));
+  }
+  return result;
+}
+
 std::string DashifyString(const std::string& underscore_string) {
   std::string result = underscore_string;
   std::replace(result.begin(), result.end(), '_', '-');
@@ -277,6 +290,42 @@ void ReplaceFileContentsIfDifferent(const std::string& file_path,
     new_contents_stream << contents;
     new_contents_stream.close();
   }
+}
+
+IfDefScope::IfDefScope(std::ostream& os, std::string d)
+    : os_(os), d_(std::move(d)) {
+  os_ << "#ifdef " << d_ << "\n";
+}
+IfDefScope::~IfDefScope() { os_ << "#endif  // " << d_ << "\n"; }
+
+NamespaceScope::NamespaceScope(std::ostream& os,
+                               std::initializer_list<std::string> namespaces)
+    : os_(os), d_(std::move(namespaces)) {
+  for (const std::string& s : d_) {
+    os_ << "namespace " << s << " {\n";
+  }
+}
+NamespaceScope::~NamespaceScope() {
+  for (auto i = d_.rbegin(); i != d_.rend(); ++i) {
+    os_ << "}  // namespace " << *i << "\n";
+  }
+}
+
+IncludeGuardScope::IncludeGuardScope(std::ostream& os, std::string file_name)
+    : os_(os),
+      d_("V8_GEN_TORQUE_GENERATED_" + CapifyStringWithUnderscores(file_name) +
+         "_") {
+  os_ << "#ifndef " << d_ << "\n";
+  os_ << "#define " << d_ << "\n\n";
+}
+IncludeGuardScope::~IncludeGuardScope() { os_ << "#endif  // " << d_ << "\n"; }
+
+IncludeObjectMacrosScope::IncludeObjectMacrosScope(std::ostream& os) : os_(os) {
+  os_ << "\n// Has to be the last include (doesn't have include guards):\n"
+         "#include \"src/objects/object-macros.h\"\n";
+}
+IncludeObjectMacrosScope::~IncludeObjectMacrosScope() {
+  os_ << "\n#include \"src/objects/object-macros-undef.h\"\n";
 }
 
 }  // namespace torque

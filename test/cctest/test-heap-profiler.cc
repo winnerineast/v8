@@ -2671,7 +2671,7 @@ TEST(ArrayGrowLeftTrim) {
 }
 
 TEST(TrackHeapAllocationsWithInlining) {
-  v8::HandleScope scope(v8::Isolate::GetCurrent());
+  v8::HandleScope scope(CcTest::isolate());
   LocalContext env;
 
   v8::HeapProfiler* heap_profiler = env->GetIsolate()->GetHeapProfiler();
@@ -2705,7 +2705,7 @@ TEST(TrackHeapAllocationsWithoutInlining) {
   // Disable inlining
   i::FLAG_max_inlined_bytecode_size = 0;
   i::FLAG_max_inlined_bytecode_size_small = 0;
-  v8::HandleScope scope(v8::Isolate::GetCurrent());
+  v8::HandleScope scope(CcTest::isolate());
   LocalContext env;
 
   v8::HeapProfiler* heap_profiler = env->GetIsolate()->GetHeapProfiler();
@@ -2752,7 +2752,7 @@ static const char* inline_heap_allocation_source =
 
 TEST(TrackBumpPointerAllocations) {
   i::FLAG_allow_natives_syntax = true;
-  v8::HandleScope scope(v8::Isolate::GetCurrent());
+  v8::HandleScope scope(CcTest::isolate());
   LocalContext env;
 
   v8::HeapProfiler* heap_profiler = env->GetIsolate()->GetHeapProfiler();
@@ -2807,7 +2807,7 @@ TEST(TrackBumpPointerAllocations) {
 
 
 TEST(TrackV8ApiAllocation) {
-  v8::HandleScope scope(v8::Isolate::GetCurrent());
+  v8::HandleScope scope(CcTest::isolate());
   LocalContext env;
 
   v8::HeapProfiler* heap_profiler = env->GetIsolate()->GetHeapProfiler();
@@ -2913,7 +2913,8 @@ TEST(ArrayBufferSharedBackingStore) {
   CHECK(ab2_data);
   CHECK_EQ(ab1_data, ab2_data);
   CHECK_EQ(2, GetRetainersCount(snapshot, ab1_data));
-  free(data);
+  ab_contents.Deleter()(ab_contents.Data(), ab_contents.ByteLength(),
+                        ab_contents.DeleterData());
 }
 
 
@@ -3428,7 +3429,8 @@ TEST(AddressToTraceMap) {
 }
 
 static const v8::AllocationProfile::Node* FindAllocationProfileNode(
-    v8::Isolate* isolate, v8::AllocationProfile& profile,
+    v8::Isolate* isolate,
+    v8::AllocationProfile& profile,  // NOLINT(runtime/references)
     const Vector<const char*>& names) {
   v8::AllocationProfile::Node* node = profile.GetRootNode();
   for (int i = 0; node != nullptr && i < names.length(); ++i) {
@@ -3474,7 +3476,7 @@ static const char* simple_sampling_heap_profiler_script =
     "foo();";
 
 TEST(SamplingHeapProfiler) {
-  v8::HandleScope scope(v8::Isolate::GetCurrent());
+  v8::HandleScope scope(CcTest::isolate());
   LocalContext env;
   v8::HeapProfiler* heap_profiler = env->GetIsolate()->GetHeapProfiler();
 
@@ -3557,7 +3559,7 @@ TEST(SamplingHeapProfiler) {
 }
 
 TEST(SamplingHeapProfilerRateAgnosticEstimates) {
-  v8::HandleScope scope(v8::Isolate::GetCurrent());
+  v8::HandleScope scope(CcTest::isolate());
   LocalContext env;
   v8::HeapProfiler* heap_profiler = env->GetIsolate()->GetHeapProfiler();
 
@@ -3639,7 +3641,7 @@ TEST(SamplingHeapProfilerRateAgnosticEstimates) {
 }
 
 TEST(SamplingHeapProfilerApiAllocation) {
-  v8::HandleScope scope(v8::Isolate::GetCurrent());
+  v8::HandleScope scope(CcTest::isolate());
   LocalContext env;
   v8::HeapProfiler* heap_profiler = env->GetIsolate()->GetHeapProfiler();
 
@@ -3662,7 +3664,7 @@ TEST(SamplingHeapProfilerApiAllocation) {
 }
 
 TEST(SamplingHeapProfilerApiSamples) {
-  v8::HandleScope scope(v8::Isolate::GetCurrent());
+  v8::HandleScope scope(CcTest::isolate());
   LocalContext env;
   v8::HeapProfiler* heap_profiler = env->GetIsolate()->GetHeapProfiler();
 
@@ -3707,7 +3709,7 @@ TEST(SamplingHeapProfilerApiSamples) {
 }
 
 TEST(SamplingHeapProfilerLeftTrimming) {
-  v8::HandleScope scope(v8::Isolate::GetCurrent());
+  v8::HandleScope scope(CcTest::isolate());
   LocalContext env;
   v8::HeapProfiler* heap_profiler = env->GetIsolate()->GetHeapProfiler();
 
@@ -3742,7 +3744,7 @@ TEST(SamplingHeapProfilerPretenuredInlineAllocations) {
     return;
   }
 
-  v8::HandleScope scope(v8::Isolate::GetCurrent());
+  v8::HandleScope scope(CcTest::isolate());
   LocalContext env;
   v8::HeapProfiler* heap_profiler = env->GetIsolate()->GetHeapProfiler();
 
@@ -3807,7 +3809,7 @@ TEST(SamplingHeapProfilerPretenuredInlineAllocations) {
 }
 
 TEST(SamplingHeapProfilerLargeInterval) {
-  v8::HandleScope scope(v8::Isolate::GetCurrent());
+  v8::HandleScope scope(CcTest::isolate());
   LocalContext env;
   v8::HeapProfiler* heap_profiler = env->GetIsolate()->GetHeapProfiler();
 
@@ -3845,7 +3847,7 @@ TEST(HeapSnapshotPrototypeNotJSReceiver) {
 TEST(SamplingHeapProfilerSampleDuringDeopt) {
   i::FLAG_allow_natives_syntax = true;
 
-  v8::HandleScope scope(v8::Isolate::GetCurrent());
+  v8::HandleScope scope(CcTest::isolate());
   LocalContext env;
   v8::HeapProfiler* heap_profiler = env->GetIsolate()->GetHeapProfiler();
 

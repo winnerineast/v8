@@ -311,7 +311,7 @@ TEST(DecodeWordFromWord32) {
   CodeAssemblerTester asm_tester(isolate);
   CodeStubAssembler m(asm_tester.state());
 
-  class TestBitField : public BitField<unsigned, 3, 3> {};
+  using TestBitField = BitField<unsigned, 3, 3>;
   m.Return(m.SmiTag(
       m.Signed(m.DecodeWordFromWord32<TestBitField>(m.Int32Constant(0x2F)))));
   FunctionTester ft(asm_tester.GenerateCode());
@@ -1559,8 +1559,8 @@ TEST(TryLookupElement) {
 
     v8::ArrayBuffer::Contents contents = buffer->Externalize();
     buffer->Detach();
-    isolate->array_buffer_allocator()->Free(contents.Data(),
-                                            contents.ByteLength());
+    contents.Deleter()(contents.Data(), contents.ByteLength(),
+                       contents.DeleterData());
 
     CHECK_ABSENT(object, 0);
     CHECK_ABSENT(object, 1);
@@ -1573,7 +1573,7 @@ TEST(TryLookupElement) {
     Handle<JSFunction> constructor = isolate->string_function();
     Handle<JSObject> object = factory->NewJSObject(constructor);
     Handle<String> str = factory->InternalizeUtf8String("ab");
-    Handle<JSValue>::cast(object)->set_value(*str);
+    Handle<JSPrimitiveWrapper>::cast(object)->set_value(*str);
     AddElement(object, 13, smi0);
     CHECK_EQ(FAST_STRING_WRAPPER_ELEMENTS, object->map().elements_kind());
 
@@ -1588,7 +1588,7 @@ TEST(TryLookupElement) {
     Handle<JSFunction> constructor = isolate->string_function();
     Handle<JSObject> object = factory->NewJSObject(constructor);
     Handle<String> str = factory->InternalizeUtf8String("ab");
-    Handle<JSValue>::cast(object)->set_value(*str);
+    Handle<JSPrimitiveWrapper>::cast(object)->set_value(*str);
     AddElement(object, 13, smi0);
     JSObject::NormalizeElements(object);
     CHECK_EQ(SLOW_STRING_WRAPPER_ELEMENTS, object->map().elements_kind());
@@ -1654,6 +1654,15 @@ TEST(AllocateJSObjectFromMap) {
 
     Node* result = m.AllocateJSObjectFromMap(map, properties, elements);
 
+    CodeStubAssembler::Label done(&m);
+    m.GotoIfNot(m.IsJSArrayMap(map), &done);
+
+    // JS array verification requires the length field to be set.
+    m.StoreObjectFieldNoWriteBarrier(result, JSArray::kLengthOffset,
+                                     m.SmiConstant(0));
+    m.Goto(&done);
+
+    m.Bind(&done);
     m.Return(result);
   }
 

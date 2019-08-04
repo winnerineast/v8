@@ -15,6 +15,7 @@
 #include "src/base/optional.h"
 #include "src/torque/constants.h"
 #include "src/torque/source-positions.h"
+#include "src/torque/utils.h"
 
 namespace v8 {
 namespace internal {
@@ -45,8 +46,7 @@ namespace torque {
 #define AST_TYPE_EXPRESSION_NODE_KIND_LIST(V) \
   V(BasicTypeExpression)                      \
   V(FunctionTypeExpression)                   \
-  V(UnionTypeExpression)                      \
-  V(ReferenceTypeExpression)
+  V(UnionTypeExpression)
 
 #define AST_STATEMENT_NODE_KIND_LIST(V) \
   V(BlockStatement)                     \
@@ -559,14 +559,18 @@ struct NewExpression : Expression {
   std::vector<NameAndExpression> initializers;
 };
 
+enum class ImplicitKind { kNoImplicit, kJSImplicit, kImplicit };
+
 struct ParameterList {
   std::vector<Identifier*> names;
   std::vector<TypeExpression*> types;
-  size_t implicit_count;
-  bool has_varargs;
-  std::string arguments_variable;
+  ImplicitKind implicit_kind = ImplicitKind::kNoImplicit;
+  SourcePosition implicit_kind_pos = SourcePosition::Invalid();
+  size_t implicit_count = 0;
+  bool has_varargs = false;
+  std::string arguments_variable = "";
 
-  static ParameterList Empty() { return ParameterList{{}, {}, 0, false, ""}; }
+  static ParameterList Empty() { return {}; }
   std::vector<TypeExpression*> GetImplicitTypes() {
     return std::vector<TypeExpression*>(types.begin(),
                                         types.begin() + implicit_count);
@@ -581,14 +585,17 @@ struct BasicTypeExpression : TypeExpression {
   DEFINE_AST_NODE_LEAF_BOILERPLATE(BasicTypeExpression)
   BasicTypeExpression(SourcePosition pos,
                       std::vector<std::string> namespace_qualification,
-                      std::string name)
+                      std::string name,
+                      std::vector<TypeExpression*> generic_arguments)
       : TypeExpression(kKind, pos),
         namespace_qualification(std::move(namespace_qualification)),
         is_constexpr(IsConstexprName(name)),
-        name(std::move(name)) {}
+        name(std::move(name)),
+        generic_arguments(std::move(generic_arguments)) {}
   std::vector<std::string> namespace_qualification;
   bool is_constexpr;
   std::string name;
+  std::vector<TypeExpression*> generic_arguments;
 };
 
 struct FunctionTypeExpression : TypeExpression {
@@ -609,13 +616,6 @@ struct UnionTypeExpression : TypeExpression {
       : TypeExpression(kKind, pos), a(a), b(b) {}
   TypeExpression* a;
   TypeExpression* b;
-};
-
-struct ReferenceTypeExpression : TypeExpression {
-  DEFINE_AST_NODE_LEAF_BOILERPLATE(ReferenceTypeExpression)
-  ReferenceTypeExpression(SourcePosition pos, TypeExpression* referenced_type)
-      : TypeExpression(kKind, pos), referenced_type(referenced_type) {}
-  TypeExpression* referenced_type;
 };
 
 struct ExpressionStatement : Statement {
@@ -821,6 +821,11 @@ struct NameAndTypeExpression {
   TypeExpression* type;
 };
 
+struct ImplicitParameters {
+  Identifier* kind;
+  std::vector<NameAndTypeExpression> parameters;
+};
+
 struct StructFieldExpression {
   NameAndTypeExpression name_and_type;
   bool const_qualified;
@@ -880,7 +885,12 @@ struct MacroDeclaration : CallableNode {
                    const LabelAndTypesVector& labels)
       : CallableNode(kind, pos, transitioning, std::move(name),
                      std::move(parameters), return_type, labels),
-        op(std::move(op)) {}
+        op(std::move(op)) {
+    if (parameters.implicit_kind == ImplicitKind::kJSImplicit) {
+      Error("Cannot use \"js-implicit\" with macros, use \"implicit\" instead.")
+          .Position(parameters.implicit_kind_pos);
+    }
+  }
   base::Optional<std::string> op;
 };
 
@@ -904,7 +914,11 @@ struct IntrinsicDeclaration : CallableNode {
   IntrinsicDeclaration(SourcePosition pos, std::string name,
                        ParameterList parameters, TypeExpression* return_type)
       : CallableNode(kKind, pos, false, std::move(name), std::move(parameters),
-                     return_type, {}) {}
+                     return_type, {}) {
+    if (parameters.implicit_kind != ImplicitKind::kNoImplicit) {
+      Error("Intinsics cannot have implicit parameters.");
+    }
+  }
 };
 
 struct TorqueMacroDeclaration : MacroDeclaration {
@@ -928,7 +942,21 @@ struct BuiltinDeclaration : CallableNode {
                      TypeExpression* return_type)
       : CallableNode(kind, pos, transitioning, std::move(name),
                      std::move(parameters), return_type, {}),
-        javascript_linkage(javascript_linkage) {}
+        javascript_linkage(javascript_linkage) {
+    if (parameters.implicit_kind == ImplicitKind::kJSImplicit &&
+        !javascript_linkage) {
+      Error(
+          "\"js-implicit\" is for implicit parameters passed according to the "
+          "JavaScript calling convention. Use \"implicit\" instead.");
+    }
+    if (parameters.implicit_kind == ImplicitKind::kImplicit &&
+        javascript_linkage) {
+      Error(
+          "The JavaScript calling convention implicitly passes a fixed set of "
+          "values. Use \"js-implicit\" to refer to those.")
+          .Position(parameters.implicit_kind_pos);
+    }
+  }
   bool javascript_linkage;
 };
 
@@ -1037,12 +1065,17 @@ struct StructDeclaration : TypeDeclaration {
   DEFINE_AST_NODE_LEAF_BOILERPLATE(StructDeclaration)
   StructDeclaration(SourcePosition pos, Identifier* name,
                     std::vector<Declaration*> methods,
-                    std::vector<StructFieldExpression> fields)
+                    std::vector<StructFieldExpression> fields,
+                    std::vector<Identifier*> generic_parameters)
       : TypeDeclaration(kKind, pos, name),
         methods(std::move(methods)),
-        fields(std::move(fields)) {}
+        fields(std::move(fields)),
+        generic_parameters(std::move(generic_parameters)) {}
   std::vector<Declaration*> methods;
   std::vector<StructFieldExpression> fields;
+  std::vector<Identifier*> generic_parameters;
+
+  bool IsGeneric() const { return !generic_parameters.empty(); }
 };
 
 struct ClassDeclaration : TypeDeclaration {

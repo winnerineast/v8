@@ -70,7 +70,6 @@ class CodeTracer;
 class CompilationCache;
 class CompilationStatistics;
 class CompilerDispatcher;
-class ContextSlotCache;
 class Counters;
 class Debug;
 class DeoptimizerData;
@@ -92,8 +91,8 @@ class RootVisitor;
 class RuntimeProfiler;
 class SetupIsolateDelegate;
 class Simulator;
-class StartupDeserializer;
 class StandardFrame;
+class StartupDeserializer;
 class StubCache;
 class ThreadManager;
 class ThreadState;
@@ -398,6 +397,8 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
   V(OOMErrorCallback, oom_behavior, nullptr)                                   \
   V(LogEventCallback, event_logger, nullptr)                                   \
   V(AllowCodeGenerationFromStringsCallback, allow_code_gen_callback, nullptr)  \
+  V(ModifyCodeGenerationFromStringsCallback, modify_code_gen_callback,         \
+    nullptr)                                                                   \
   V(AllowWasmCodeGenerationCallback, allow_wasm_code_gen_callback, nullptr)    \
   V(ExtensionCallback, wasm_module_callback, &NoExtension)                     \
   V(ExtensionCallback, wasm_instance_callback, &NoExtension)                   \
@@ -515,6 +516,8 @@ class Isolate final : private HiddenFactory {
   // Sets default isolate into "has_been_disposed" state rather then destroying,
   // for legacy API reasons.
   static void Delete(Isolate* isolate);
+
+  void SetUpFromReadOnlyHeap(ReadOnlyHeap* ro_heap);
 
   // Returns allocation mode of this isolate.
   V8_INLINE IsolateAllocationMode isolate_allocation_mode();
@@ -901,6 +904,7 @@ class Isolate final : private HiddenFactory {
   }
   StackGuard* stack_guard() { return &stack_guard_; }
   Heap* heap() { return &heap_; }
+  ReadOnlyHeap* read_only_heap() const { return read_only_heap_; }
   static Isolate* FromHeap(Heap* heap) {
     return reinterpret_cast<Isolate*>(reinterpret_cast<Address>(heap) -
                                       OFFSET_OF(Isolate, heap_));
@@ -1172,7 +1176,8 @@ class Isolate final : private HiddenFactory {
 
   inline bool IsArraySpeciesLookupChainIntact();
   inline bool IsTypedArraySpeciesLookupChainIntact();
-  inline bool IsRegExpSpeciesLookupChainIntact();
+  inline bool IsRegExpSpeciesLookupChainIntact(
+      Handle<NativeContext> native_context);
 
   // Check that the @@species protector is intact, which guards the lookup of
   // "constructor" on JSPromise instances, whose [[Prototype]] is the initial
@@ -1254,10 +1259,14 @@ class Isolate final : private HiddenFactory {
   void UpdateNoElementsProtectorOnNormalizeElements(Handle<JSObject> object) {
     UpdateNoElementsProtectorOnSetElement(object);
   }
+
+  // The `protector_name` C string must be statically allocated.
+  void TraceProtectorInvalidation(const char* protector_name);
+
   void InvalidateArrayConstructorProtector();
   void InvalidateArraySpeciesProtector();
   void InvalidateTypedArraySpeciesProtector();
-  void InvalidateRegExpSpeciesProtector();
+  void InvalidateRegExpSpeciesProtector(Handle<NativeContext> native_context);
   void InvalidatePromiseSpeciesProtector();
   void InvalidateIsConcatSpreadableProtector();
   void InvalidateStringLengthOverflowProtector();
@@ -1399,6 +1408,8 @@ class Isolate final : private HiddenFactory {
   void AddDetachedContext(Handle<Context> context);
   void CheckDetachedContextsAfterGC();
 
+  void AddSharedWasmMemory(Handle<WasmMemoryObject> memory_object);
+
   std::vector<Object>* partial_snapshot_cache() {
     return &partial_snapshot_cache_;
   }
@@ -1464,6 +1475,11 @@ class Isolate final : private HiddenFactory {
 
   bool IsInAnyContext(Object object, uint32_t index);
 
+  void ClearKeptObjects();
+  void SetHostCleanupFinalizationGroupCallback(
+      HostCleanupFinalizationGroupCallback callback);
+  void RunHostCleanupFinalizationGroupCallback(Handle<JSFinalizationGroup> fg);
+
   void SetHostImportModuleDynamicallyCallback(
       HostImportModuleDynamicallyCallback callback);
   V8_EXPORT_PRIVATE MaybeHandle<JSPromise>
@@ -1473,7 +1489,7 @@ class Isolate final : private HiddenFactory {
   void SetHostInitializeImportMetaObjectCallback(
       HostInitializeImportMetaObjectCallback callback);
   V8_EXPORT_PRIVATE Handle<JSObject> RunHostInitializeImportMetaObjectCallback(
-      Handle<Module> module);
+      Handle<SourceTextModule> module);
 
   void RegisterEmbeddedFileWriter(EmbeddedFileWriterInterface* writer) {
     embedded_file_writer_ = writer;
@@ -1488,11 +1504,11 @@ class Isolate final : private HiddenFactory {
   // annotate the builtin blob with debugging information.
   void PrepareBuiltinSourcePositionMap();
 
-#if defined(V8_OS_WIN_X64)
+#if defined(V8_OS_WIN64)
   void SetBuiltinUnwindData(
       int builtin_index,
       const win64_unwindinfo::BuiltinUnwindInfo& unwinding_info);
-#endif
+#endif  // V8_OS_WIN64
 
   void SetPrepareStackTraceCallback(PrepareStackTraceCallback callback);
   MaybeHandle<Object> RunPrepareStackTraceCallback(Handle<Context>,
@@ -1651,6 +1667,7 @@ class Isolate final : private HiddenFactory {
 
   std::unique_ptr<IsolateAllocator> isolate_allocator_;
   Heap heap_;
+  ReadOnlyHeap* read_only_heap_ = nullptr;
 
   const int id_;
   EntryStackItem* entry_stack_ = nullptr;
@@ -1700,6 +1717,8 @@ class Isolate final : private HiddenFactory {
   v8::Isolate::AtomicsWaitCallback atomics_wait_callback_ = nullptr;
   void* atomics_wait_callback_data_ = nullptr;
   PromiseHook promise_hook_ = nullptr;
+  HostCleanupFinalizationGroupCallback
+      host_cleanup_finalization_group_callback_ = nullptr;
   HostImportModuleDynamicallyCallback host_import_module_dynamically_callback_ =
       nullptr;
   HostInitializeImportMetaObjectCallback

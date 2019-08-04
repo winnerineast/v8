@@ -1246,8 +1246,9 @@ void AdjustStackPointerForTailCall(
   }
 }
 
-void EmitWordLoadPoisoningIfNeeded(CodeGenerator* codegen, Instruction* instr,
-                                   S390OperandConverter& i) {
+void EmitWordLoadPoisoningIfNeeded(
+    CodeGenerator* codegen, Instruction* instr,
+    S390OperandConverter& i) {  // NOLINT(runtime/references)
   const MemoryAccessMode access_mode =
       static_cast<MemoryAccessMode>(MiscField::decode(instr->opcode()));
   if (access_mode == kMemoryAccessPoisoned) {
@@ -1557,32 +1558,29 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchTableSwitch:
       AssembleArchTableSwitch(instr);
       break;
-    case kArchDebugAbort:
+    case kArchAbortCSAAssert:
       DCHECK(i.InputRegister(0) == r3);
-      if (!frame_access_state()->has_frame()) {
+      {
         // We don't actually want to generate a pile of code for this, so just
         // claim there is a stack frame, without generating one.
         FrameScope scope(tasm(), StackFrame::NONE);
-        __ Call(isolate()->builtins()->builtin_handle(Builtins::kAbortJS),
-                RelocInfo::CODE_TARGET);
-      } else {
-        __ Call(isolate()->builtins()->builtin_handle(Builtins::kAbortJS),
-                RelocInfo::CODE_TARGET);
+        __ Call(
+            isolate()->builtins()->builtin_handle(Builtins::kAbortCSAAssert),
+            RelocInfo::CODE_TARGET);
       }
-      __ stop("kArchDebugAbort");
+      __ stop();
       break;
     case kArchDebugBreak:
-      __ stop("kArchDebugBreak");
+      __ stop();
       break;
     case kArchNop:
     case kArchThrowTerminator:
       // don't emit code for nops.
       break;
     case kArchDeoptimize: {
-      int deopt_state_id =
+      DeoptimizationExit* exit =
           BuildTranslation(instr, -1, 0, OutputFrameStateCombine::Ignore());
-      CodeGenResult result =
-          AssembleDeoptimizerCall(deopt_state_id, current_source_position_);
+      CodeGenResult result = AssembleDeoptimizerCall(exit);
       if (result != kSuccess) return result;
       break;
     }
@@ -2901,7 +2899,7 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
             new (gen_->zone()) ReferenceMap(gen_->zone());
         gen_->RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
         if (FLAG_debug_code) {
-          __ stop(GetAbortReason(AbortReason::kUnexpectedReturnFromWasmTrap));
+          __ stop();
         }
       }
     }
@@ -3024,8 +3022,14 @@ void CodeGenerator::AssembleConstructFrame() {
 
   if (frame_access_state()->has_frame()) {
     if (call_descriptor->IsCFunctionCall()) {
-      __ Push(r14, fp);
-      __ LoadRR(fp, sp);
+      if (info()->GetOutputStackFrameType() == StackFrame::C_WASM_ENTRY) {
+        __ StubPrologue(StackFrame::C_WASM_ENTRY);
+        // Reserve stack space for saving the c_entry_fp later.
+        __ lay(sp, MemOperand(sp, -kSystemPointerSize));
+      } else {
+        __ Push(r14, fp);
+        __ LoadRR(fp, sp);
+      }
     } else if (call_descriptor->IsJSFunctionCall()) {
       __ Prologue(ip);
       if (call_descriptor->PushArgumentCount()) {
@@ -3057,8 +3061,8 @@ void CodeGenerator::AssembleConstructFrame() {
     }
   }
 
-  int required_slots = frame()->GetTotalFrameSlotCount() -
-                       call_descriptor->CalculateFixedFrameSize();
+  int required_slots =
+      frame()->GetTotalFrameSlotCount() - frame()->GetFixedSlotCount();
   if (info()->is_osr()) {
     // TurboFan OSR-compiled functions cannot be entered directly.
     __ Abort(AbortReason::kShouldNotDirectlyEnterOsrFunction);
@@ -3104,7 +3108,7 @@ void CodeGenerator::AssembleConstructFrame() {
       ReferenceMap* reference_map = new (zone()) ReferenceMap(zone());
       RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
       if (FLAG_debug_code) {
-        __ stop(GetAbortReason(AbortReason::kUnexpectedReturnFromThrow));
+        __ stop();
       }
 
       __ bind(&done);
@@ -3187,6 +3191,8 @@ void CodeGenerator::AssembleReturn(InstructionOperand* pop) {
 }
 
 void CodeGenerator::FinishCode() {}
+
+void CodeGenerator::PrepareForDeoptimizationExits(int deopt_count) {}
 
 void CodeGenerator::AssembleMove(InstructionOperand* source,
                                  InstructionOperand* destination) {

@@ -1534,6 +1534,15 @@ void Generate_ContinueToBuiltinHelper(MacroAssembler* masm,
                             BuiltinContinuationFrameConstants::kFixedFrameSize),
            eax);
   }
+
+  // Replace the builtin index Smi on the stack with the start address of the
+  // builtin loaded from the builtins table. The ret below will return to this
+  // address.
+  int offset_to_builtin_index = allocatable_register_count * kSystemPointerSize;
+  __ mov(eax, Operand(esp, offset_to_builtin_index));
+  __ LoadEntryFromBuiltinIndex(eax);
+  __ mov(Operand(esp, offset_to_builtin_index), eax);
+
   for (int i = allocatable_register_count - 1; i >= 0; --i) {
     int code = config->GetAllocatableGeneralCode(i);
     __ pop(Register::from_code(code));
@@ -1549,7 +1558,6 @@ void Generate_ContinueToBuiltinHelper(MacroAssembler* masm,
       kSystemPointerSize;
   __ pop(Operand(esp, offsetToPC));
   __ Drop(offsetToPC / kSystemPointerSize);
-  __ add(Operand(esp, 0), Immediate(Code::kHeaderSize - kHeapObjectTag));
   __ ret(0);
 }
 }  // namespace
@@ -2668,7 +2676,10 @@ void Builtins::Generate_WasmCompileLazy(MacroAssembler* masm) {
     __ Push(kWasmCompileLazyFuncIndexRegister);
     // Load the correct CEntry builtin from the instance object.
     __ mov(ecx, FieldOperand(kWasmInstanceRegister,
-                             WasmInstanceObject::kCEntryStubOffset));
+                             WasmInstanceObject::kIsolateRootOffset));
+    auto centry_id =
+        Builtins::kCEntry_Return1_DontSaveFPRegs_ArgvOnStack_NoBuiltinExit;
+    __ mov(ecx, MemOperand(ecx, IsolateData::builtin_slot_offset(centry_id)));
     // Initialize the JavaScript context with 0. CEntry will use it to
     // set the current context on the isolate.
     __ Move(kContextRegister, Smi::zero());
@@ -3017,7 +3028,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
   __ cmpb(Operand(eax, 0), Immediate(0));
   __ j(not_zero, &profiler_enabled);
   __ Move(eax, Immediate(ExternalReference::address_of_runtime_stats_flag()));
-  __ cmpb(Operand(eax, 0), Immediate(0));
+  __ cmp(Operand(eax, 0), Immediate(0));
   __ j(not_zero, &profiler_enabled);
   {
     // Call the api function directly.
@@ -3083,6 +3094,9 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
   __ j(above_equal, &ok, Label::kNear);
 
   __ CompareRoot(map, RootIndex::kHeapNumberMap);
+  __ j(equal, &ok, Label::kNear);
+
+  __ CompareRoot(map, RootIndex::kBigIntMap);
   __ j(equal, &ok, Label::kNear);
 
   __ CompareRoot(return_value, RootIndex::kUndefinedValue);

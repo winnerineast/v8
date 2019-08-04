@@ -1509,13 +1509,16 @@ void Generate_ContinueToBuiltinHelper(MacroAssembler* masm,
   __ ldr(fp, MemOperand(
                  sp, BuiltinContinuationFrameConstants::kFixedFrameSizeFromFp));
 
+  // Load builtin index (stored as a Smi) and use it to get the builtin start
+  // address from the builtins table.
   UseScratchRegisterScope temps(masm);
-  Register scratch = temps.Acquire();
-  __ Pop(scratch);
+  Register builtin = temps.Acquire();
+  __ Pop(builtin);
   __ add(sp, sp,
          Operand(BuiltinContinuationFrameConstants::kFixedFrameSizeFromFp));
   __ Pop(lr);
-  __ add(pc, scratch, Operand(Code::kHeaderSize - kHeapObjectTag));
+  __ LoadEntryFromBuiltinIndex(builtin);
+  __ bx(builtin);
 }
 }  // namespace
 
@@ -2514,7 +2517,10 @@ void Builtins::Generate_WasmCompileLazy(MacroAssembler* masm) {
     __ push(kWasmCompileLazyFuncIndexRegister);
     // Load the correct CEntry builtin from the instance object.
     __ ldr(r2, FieldMemOperand(kWasmInstanceRegister,
-                               WasmInstanceObject::kCEntryStubOffset));
+                               WasmInstanceObject::kIsolateRootOffset));
+    auto centry_id =
+        Builtins::kCEntry_Return1_DontSaveFPRegs_ArgvOnStack_NoBuiltinExit;
+    __ ldr(r2, MemOperand(r2, IsolateData::builtin_slot_offset(centry_id)));
     // Initialize the JavaScript context with 0. CEntry will use it to
     // set the current context on the isolate.
     __ Move(cp, Smi::zero());
@@ -2577,7 +2583,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
       __ tst(sp, Operand(frame_alignment_mask));
       __ b(eq, &alignment_as_expected);
       // Don't use Check here, as it will call Runtime_Abort re-entering here.
-      __ stop("Unexpected alignment");
+      __ stop();
       __ bind(&alignment_as_expected);
     }
   }
@@ -2606,7 +2612,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
     __ CompareRoot(r3, RootIndex::kTheHoleValue);
     // Cannot use check here as it attempts to generate call into runtime.
     __ b(eq, &okay);
-    __ stop("Unexpected pending exception");
+    __ stop();
     __ bind(&okay);
   }
 
@@ -2841,7 +2847,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
   __ cmp(r9, Operand(0));
   __ b(ne, &profiler_enabled);
   __ Move(r9, ExternalReference::address_of_runtime_stats_flag());
-  __ ldrb(r9, MemOperand(r9, 0));
+  __ ldr(r9, MemOperand(r9, 0));
   __ cmp(r9, Operand(0));
   __ b(ne, &profiler_enabled);
   {

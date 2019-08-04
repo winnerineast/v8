@@ -1485,19 +1485,18 @@ TEST(InterpreterCall) {
   }
 }
 
-static BytecodeArrayBuilder& SetRegister(BytecodeArrayBuilder& builder,
-                                         Register reg, int value,
-                                         Register scratch) {
+static BytecodeArrayBuilder& SetRegister(
+    BytecodeArrayBuilder& builder,  // NOLINT(runtime/references)
+    Register reg, int value, Register scratch) {
   return builder.StoreAccumulatorInRegister(scratch)
       .LoadLiteral(Smi::FromInt(value))
       .StoreAccumulatorInRegister(reg)
       .LoadAccumulatorWithRegister(scratch);
 }
 
-static BytecodeArrayBuilder& IncrementRegister(BytecodeArrayBuilder& builder,
-                                               Register reg, int value,
-                                               Register scratch,
-                                               int slot_index) {
+static BytecodeArrayBuilder& IncrementRegister(
+    BytecodeArrayBuilder& builder,  // NOLINT(runtime/references)
+    Register reg, int value, Register scratch, int slot_index) {
   return builder.StoreAccumulatorInRegister(scratch)
       .LoadLiteral(Smi::FromInt(value))
       .BinaryOperation(Token::Value::ADD, reg, slot_index)
@@ -5064,6 +5063,7 @@ TEST(InterpreterGetBytecodeHandler) {
 
 TEST(InterpreterCollectSourcePositions) {
   FLAG_enable_lazy_source_positions = true;
+  FLAG_stress_lazy_source_positions = false;
   HandleAndZoneScope handles;
   Isolate* isolate = handles.main_isolate();
 
@@ -5089,6 +5089,7 @@ TEST(InterpreterCollectSourcePositions) {
 
 TEST(InterpreterCollectSourcePositions_StackOverflow) {
   FLAG_enable_lazy_source_positions = true;
+  FLAG_stress_lazy_source_positions = false;
   HandleAndZoneScope handles;
   Isolate* isolate = handles.main_isolate();
 
@@ -5125,6 +5126,7 @@ TEST(InterpreterCollectSourcePositions_StackOverflow) {
 
 TEST(InterpreterCollectSourcePositions_ThrowFrom1stFrame) {
   FLAG_enable_lazy_source_positions = true;
+  FLAG_stress_lazy_source_positions = false;
   HandleAndZoneScope handles;
   Isolate* isolate = handles.main_isolate();
 
@@ -5160,6 +5162,7 @@ TEST(InterpreterCollectSourcePositions_ThrowFrom1stFrame) {
 
 TEST(InterpreterCollectSourcePositions_ThrowFrom2ndFrame) {
   FLAG_enable_lazy_source_positions = true;
+  FLAG_stress_lazy_source_positions = false;
   HandleAndZoneScope handles;
   Isolate* isolate = handles.main_isolate();
 
@@ -5216,6 +5219,7 @@ void CheckStringEqual(const char* expected_ptr, Handle<Object> actual_handle) {
 
 TEST(InterpreterCollectSourcePositions_GenerateStackTrace) {
   FLAG_enable_lazy_source_positions = true;
+  FLAG_stress_lazy_source_positions = false;
   HandleAndZoneScope handles;
   Isolate* isolate = handles.main_isolate();
 

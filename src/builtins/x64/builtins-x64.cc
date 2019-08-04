@@ -1562,7 +1562,15 @@ void Generate_ContinueToBuiltinHelper(MacroAssembler* masm,
       kSystemPointerSize;
   __ popq(Operand(rsp, offsetToPC));
   __ Drop(offsetToPC / kSystemPointerSize);
-  __ addq(Operand(rsp, 0), Immediate(Code::kHeaderSize - kHeapObjectTag));
+
+  // Replace the builtin index Smi on the stack with the instruction start
+  // address of the builtin from the builtins table, and then Ret to this
+  // address
+  __ movq(kScratchRegister, Operand(rsp, 0));
+  __ movq(kScratchRegister,
+          __ EntryFromBuiltinIndexAsOperand(kScratchRegister));
+  __ movq(Operand(rsp, 0), kScratchRegister);
+
   __ Ret();
 }
 }  // namespace
@@ -2655,9 +2663,12 @@ void Builtins::Generate_WasmCompileLazy(MacroAssembler* masm) {
     // Push the function index as second argument.
     __ Push(r11);
     // Load the correct CEntry builtin from the instance object.
+    __ movq(rcx, FieldOperand(kWasmInstanceRegister,
+                              WasmInstanceObject::kIsolateRootOffset));
+    auto centry_id =
+        Builtins::kCEntry_Return1_DontSaveFPRegs_ArgvOnStack_NoBuiltinExit;
     __ LoadTaggedPointerField(
-        rcx, FieldOperand(kWasmInstanceRegister,
-                          WasmInstanceObject::kCEntryStubOffset));
+        rcx, MemOperand(rcx, IsolateData::builtin_slot_offset(centry_id)));
     // Initialize the JavaScript context with 0. CEntry will use it to
     // set the current context on the isolate.
     __ Move(kContextRegister, Smi::zero());
@@ -3007,7 +3018,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
   __ cmpb(Operand(rax, 0), Immediate(0));
   __ j(not_zero, &profiler_enabled);
   __ Move(rax, ExternalReference::address_of_runtime_stats_flag());
-  __ cmpb(Operand(rax, 0), Immediate(0));
+  __ cmpl(Operand(rax, 0), Immediate(0));
   __ j(not_zero, &profiler_enabled);
   {
     // Call the api function directly.
@@ -3066,6 +3077,9 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
   __ j(above_equal, &ok, Label::kNear);
 
   __ CompareRoot(map, RootIndex::kHeapNumberMap);
+  __ j(equal, &ok, Label::kNear);
+
+  __ CompareRoot(map, RootIndex::kBigIntMap);
   __ j(equal, &ok, Label::kNear);
 
   __ CompareRoot(return_value, RootIndex::kUndefinedValue);

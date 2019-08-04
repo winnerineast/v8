@@ -26,6 +26,7 @@
 #include "src/logging/log.h"
 #include "src/numbers/math-random.h"
 #include "src/objects/objects-inl.h"
+#include "src/regexp/regexp-interpreter.h"
 #include "src/regexp/regexp-macro-assembler-arch.h"
 #include "src/regexp/regexp-stack.h"
 #include "src/strings/string-search.h"
@@ -481,6 +482,9 @@ FUNCTION_REFERENCE_WITH_ISOLATE(re_check_stack_guard_state, re_stack_check_func)
 FUNCTION_REFERENCE_WITH_ISOLATE(re_grow_stack,
                                 NativeRegExpMacroAssembler::GrowStack)
 
+FUNCTION_REFERENCE_WITH_ISOLATE(re_match_for_call_from_js,
+                                IrregexpInterpreter::MatchForCallFromJs)
+
 FUNCTION_REFERENCE_WITH_ISOLATE(
     re_case_insensitive_compare_uc16,
     NativeRegExpMacroAssembler::CaseInsensitiveCompareUC16)
@@ -773,6 +777,12 @@ ExternalReference ExternalReference::fast_c_call_caller_pc_address(
     Isolate* isolate) {
   return ExternalReference(
       isolate->isolate_data()->fast_c_call_caller_pc_address());
+}
+
+ExternalReference ExternalReference::stack_is_iterable_address(
+    Isolate* isolate) {
+  return ExternalReference(
+      isolate->isolate_data()->stack_is_iterable_address());
 }
 
 FUNCTION_REFERENCE(call_enqueue_microtask_function,

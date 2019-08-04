@@ -7,8 +7,8 @@
 
 #include "src/objects/code.h"
 
+#include "src/base/memory.h"
 #include "src/codegen/code-desc.h"
-#include "src/common/v8memory.h"
 #include "src/execution/isolate.h"
 #include "src/interpreter/bytecode-register.h"
 #include "src/objects/dictionary.h"
@@ -29,7 +29,7 @@ OBJECT_CONSTRUCTORS_IMPL(BytecodeArray, FixedArrayBase)
 OBJECT_CONSTRUCTORS_IMPL(AbstractCode, HeapObject)
 OBJECT_CONSTRUCTORS_IMPL(DependentCode, WeakFixedArray)
 OBJECT_CONSTRUCTORS_IMPL(CodeDataContainer, HeapObject)
-OBJECT_CONSTRUCTORS_IMPL(SourcePositionTableWithFrameCache, Struct)
+TQ_OBJECT_CONSTRUCTORS_IMPL(SourcePositionTableWithFrameCache)
 
 NEVER_READ_ONLY_SPACE_IMPL(AbstractCode)
 
@@ -39,12 +39,6 @@ CAST_ACCESSOR(Code)
 CAST_ACCESSOR(CodeDataContainer)
 CAST_ACCESSOR(DependentCode)
 CAST_ACCESSOR(DeoptimizationData)
-CAST_ACCESSOR(SourcePositionTableWithFrameCache)
-
-ACCESSORS(SourcePositionTableWithFrameCache, source_position_table, ByteArray,
-          kSourcePositionTableOffset)
-ACCESSORS(SourcePositionTableWithFrameCache, stack_frame_cache,
-          SimpleNumberDictionary, kStackFrameCacheOffset)
 
 int AbstractCode::raw_instruction_size() {
   if (IsCode()) {
@@ -331,7 +325,9 @@ int Code::SizeIncludingMetadata() const {
 }
 
 ByteArray Code::unchecked_relocation_info() const {
-  return ByteArray::unchecked_cast(READ_FIELD(*this, kRelocationInfoOffset));
+  Isolate* isolate = GetIsolateForPtrCompr(*this);
+  return ByteArray::unchecked_cast(
+      TaggedField<HeapObject, kRelocationInfoOffset>::load(isolate, *this));
 }
 
 byte* Code::relocation_start() const {
@@ -575,7 +571,7 @@ Code Code::GetCodeFromTargetAddress(Address address) {
 }
 
 Code Code::GetObjectFromEntryAddress(Address location_of_address) {
-  Address code_entry = Memory<Address>(location_of_address);
+  Address code_entry = base::Memory<Address>(location_of_address);
   HeapObject code = HeapObject::FromAddress(code_entry - Code::kHeaderSize);
   // Unchecked cast because we can't rely on the map currently
   // not being a forwarding pointer.
@@ -745,7 +741,9 @@ ByteArray BytecodeArray::SourcePositionTableIfCollected() const {
 
 void BytecodeArray::ClearFrameCacheFromSourcePositionTable() {
   Object maybe_table = source_position_table();
-  if (maybe_table.IsUndefined() || maybe_table.IsByteArray()) return;
+  if (maybe_table.IsUndefined() || maybe_table.IsByteArray() ||
+      maybe_table.IsException())
+    return;
   DCHECK(maybe_table.IsSourcePositionTableWithFrameCache());
   set_source_position_table(SourcePositionTableWithFrameCache::cast(maybe_table)
                                 .source_position_table());
@@ -770,6 +768,7 @@ DEFINE_DEOPT_ELEMENT_ACCESSORS(OsrBytecodeOffset, Smi)
 DEFINE_DEOPT_ELEMENT_ACCESSORS(OsrPcOffset, Smi)
 DEFINE_DEOPT_ELEMENT_ACCESSORS(OptimizationId, Smi)
 DEFINE_DEOPT_ELEMENT_ACCESSORS(InliningPositions, PodArray<InliningPosition>)
+DEFINE_DEOPT_ELEMENT_ACCESSORS(DeoptExitStart, Smi)
 
 DEFINE_DEOPT_ENTRY_ACCESSORS(BytecodeOffsetRaw, Smi)
 DEFINE_DEOPT_ENTRY_ACCESSORS(TranslationIndex, Smi)

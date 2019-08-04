@@ -4,9 +4,12 @@
 
 #include "src/regexp/regexp-compiler.h"
 
-#include "src/regexp/jsregexp.h"
+#include "src/execution/isolate.h"
+#include "src/regexp/regexp.h"
+#ifdef V8_INTL_SUPPORT
+#include "src/regexp/special-case.h"
+#endif  // V8_INTL_SUPPORT
 #include "src/strings/unicode-inl.h"
-#include "src/utils/splay-tree-inl.h"
 #include "src/zone/zone-list-inl.h"
 
 #ifdef V8_INTL_SUPPORT
@@ -19,11 +22,6 @@ namespace v8 {
 namespace internal {
 
 using namespace regexp_compiler_constants;  // NOLINT(build/namespaces)
-
-// Explicit template instantiations.
-template class ZoneSplayTree<DispatchTable::Config>;
-template void DispatchTable::ForEach<UnicodeRangeSplitter>(
-    UnicodeRangeSplitter*);
 
 // -------------------------------------------------------------------
 // Tree to graph conversion
@@ -127,14 +125,7 @@ bool RegExpCharacterClass::is_standard(Zone* zone) {
   return false;
 }
 
-UnicodeRangeSplitter::UnicodeRangeSplitter(Zone* zone,
-                                           ZoneList<CharacterRange>* base)
-    : zone_(zone),
-      table_(zone),
-      bmp_(nullptr),
-      lead_surrogates_(nullptr),
-      trail_surrogates_(nullptr),
-      non_bmp_(nullptr) {
+UnicodeRangeSplitter::UnicodeRangeSplitter(ZoneList<CharacterRange>* base) {
   // The unicode range splitter categorizes given character ranges into:
   // - Code points from the BMP representable by one code unit.
   // - Code points outside the BMP that need to be split into surrogate pairs.
@@ -142,50 +133,75 @@ UnicodeRangeSplitter::UnicodeRangeSplitter(Zone* zone,
   // - Lone trail surrogates.
   // Lone surrogates are valid code points, even though no actual characters.
   // They require special matching to make sure we do not split surrogate pairs.
-  // We use the dispatch table to accomplish this. The base range is split up
-  // by the table by the overlay ranges, and the Call callback is used to
-  // filter and collect ranges for each category.
-  for (int i = 0; i < base->length(); i++) {
-    table_.AddRange(base->at(i), kBase, zone_);
-  }
-  // Add overlay ranges.
-  table_.AddRange(CharacterRange::Range(0, kLeadSurrogateStart - 1),
-                  kBmpCodePoints, zone_);
-  table_.AddRange(CharacterRange::Range(kLeadSurrogateStart, kLeadSurrogateEnd),
-                  kLeadSurrogates, zone_);
-  table_.AddRange(
-      CharacterRange::Range(kTrailSurrogateStart, kTrailSurrogateEnd),
-      kTrailSurrogates, zone_);
-  table_.AddRange(
-      CharacterRange::Range(kTrailSurrogateEnd + 1, kNonBmpStart - 1),
-      kBmpCodePoints, zone_);
-  table_.AddRange(CharacterRange::Range(kNonBmpStart, kNonBmpEnd),
-                  kNonBmpCodePoints, zone_);
-  table_.ForEach(this);
+
+  for (int i = 0; i < base->length(); i++) AddRange(base->at(i));
 }
 
-void UnicodeRangeSplitter::Call(uc32 from, DispatchTable::Entry entry) {
-  OutSet* outset = entry.out_set();
-  if (!outset->Get(kBase)) return;
-  ZoneList<CharacterRange>** target = nullptr;
-  if (outset->Get(kBmpCodePoints)) {
-    target = &bmp_;
-  } else if (outset->Get(kLeadSurrogates)) {
-    target = &lead_surrogates_;
-  } else if (outset->Get(kTrailSurrogates)) {
-    target = &trail_surrogates_;
-  } else {
-    DCHECK(outset->Get(kNonBmpCodePoints));
-    target = &non_bmp_;
+void UnicodeRangeSplitter::AddRange(CharacterRange range) {
+  static constexpr uc32 kBmp1Start = 0;
+  static constexpr uc32 kBmp1End = kLeadSurrogateStart - 1;
+  static constexpr uc32 kBmp2Start = kTrailSurrogateEnd + 1;
+  static constexpr uc32 kBmp2End = kNonBmpStart - 1;
+
+  // Ends are all inclusive.
+  STATIC_ASSERT(kBmp1Start == 0);
+  STATIC_ASSERT(kBmp1Start < kBmp1End);
+  STATIC_ASSERT(kBmp1End + 1 == kLeadSurrogateStart);
+  STATIC_ASSERT(kLeadSurrogateStart < kLeadSurrogateEnd);
+  STATIC_ASSERT(kLeadSurrogateEnd + 1 == kTrailSurrogateStart);
+  STATIC_ASSERT(kTrailSurrogateStart < kTrailSurrogateEnd);
+  STATIC_ASSERT(kTrailSurrogateEnd + 1 == kBmp2Start);
+  STATIC_ASSERT(kBmp2Start < kBmp2End);
+  STATIC_ASSERT(kBmp2End + 1 == kNonBmpStart);
+  STATIC_ASSERT(kNonBmpStart < kNonBmpEnd);
+
+  static constexpr uc32 kStarts[] = {
+      kBmp1Start, kLeadSurrogateStart, kTrailSurrogateStart,
+      kBmp2Start, kNonBmpStart,
+  };
+
+  static constexpr uc32 kEnds[] = {
+      kBmp1End, kLeadSurrogateEnd, kTrailSurrogateEnd, kBmp2End, kNonBmpEnd,
+  };
+
+  CharacterRangeVector* const kTargets[] = {
+      &bmp_, &lead_surrogates_, &trail_surrogates_, &bmp_, &non_bmp_,
+  };
+
+  static constexpr int kCount = arraysize(kStarts);
+  STATIC_ASSERT(kCount == arraysize(kEnds));
+  STATIC_ASSERT(kCount == arraysize(kTargets));
+
+  for (int i = 0; i < kCount; i++) {
+    if (kStarts[i] > range.to()) break;
+    const uc32 from = std::max(kStarts[i], range.from());
+    const uc32 to = std::min(kEnds[i], range.to());
+    if (from > to) continue;
+    kTargets[i]->emplace_back(CharacterRange::Range(from, to));
   }
-  if (*target == nullptr)
-    *target = new (zone_) ZoneList<CharacterRange>(2, zone_);
-  (*target)->Add(CharacterRange::Range(entry.from(), entry.to()), zone_);
+}
+
+namespace {
+
+// Translates between new and old V8-isms (SmallVector, ZoneList).
+ZoneList<CharacterRange>* ToCanonicalZoneList(
+    const UnicodeRangeSplitter::CharacterRangeVector* v, Zone* zone) {
+  if (v->empty()) return nullptr;
+
+  ZoneList<CharacterRange>* result =
+      new (zone) ZoneList<CharacterRange>(static_cast<int>(v->size()), zone);
+  for (size_t i = 0; i < v->size(); i++) {
+    result->Add(v->at(i), zone);
+  }
+
+  CharacterRange::Canonicalize(result);
+  return result;
 }
 
 void AddBmpCharacters(RegExpCompiler* compiler, ChoiceNode* result,
                       RegExpNode* on_success, UnicodeRangeSplitter* splitter) {
-  ZoneList<CharacterRange>* bmp = splitter->bmp();
+  ZoneList<CharacterRange>* bmp =
+      ToCanonicalZoneList(splitter->bmp(), compiler->zone());
   if (bmp == nullptr) return;
   JSRegExp::Flags default_flags = JSRegExp::Flags();
   result->AddAlternative(GuardedAlternative(TextNode::CreateForCharacterRanges(
@@ -196,7 +212,8 @@ void AddBmpCharacters(RegExpCompiler* compiler, ChoiceNode* result,
 void AddNonBmpSurrogatePairs(RegExpCompiler* compiler, ChoiceNode* result,
                              RegExpNode* on_success,
                              UnicodeRangeSplitter* splitter) {
-  ZoneList<CharacterRange>* non_bmp = splitter->non_bmp();
+  ZoneList<CharacterRange>* non_bmp =
+      ToCanonicalZoneList(splitter->non_bmp(), compiler->zone());
   if (non_bmp == nullptr) return;
   DCHECK(!compiler->one_byte());
   Zone* zone = compiler->zone();
@@ -287,7 +304,8 @@ void AddLoneLeadSurrogates(RegExpCompiler* compiler, ChoiceNode* result,
                            RegExpNode* on_success,
                            UnicodeRangeSplitter* splitter) {
   JSRegExp::Flags default_flags = JSRegExp::Flags();
-  ZoneList<CharacterRange>* lead_surrogates = splitter->lead_surrogates();
+  ZoneList<CharacterRange>* lead_surrogates =
+      ToCanonicalZoneList(splitter->lead_surrogates(), compiler->zone());
   if (lead_surrogates == nullptr) return;
   Zone* zone = compiler->zone();
   // E.g. \ud801 becomes \ud801(?![\udc00-\udfff]).
@@ -315,7 +333,8 @@ void AddLoneTrailSurrogates(RegExpCompiler* compiler, ChoiceNode* result,
                             RegExpNode* on_success,
                             UnicodeRangeSplitter* splitter) {
   JSRegExp::Flags default_flags = JSRegExp::Flags();
-  ZoneList<CharacterRange>* trail_surrogates = splitter->trail_surrogates();
+  ZoneList<CharacterRange>* trail_surrogates =
+      ToCanonicalZoneList(splitter->trail_surrogates(), compiler->zone());
   if (trail_surrogates == nullptr) return;
   Zone* zone = compiler->zone();
   // E.g. \udc01 becomes (?<![\ud800-\udbff])\udc01
@@ -387,6 +406,8 @@ void AddUnicodeCaseEquivalents(ZoneList<CharacterRange>* ranges, Zone* zone) {
 #endif  // V8_INTL_SUPPORT
 }
 
+}  // namespace
+
 RegExpNode* RegExpCharacterClass::ToNode(RegExpCompiler* compiler,
                                          RegExpNode* on_success) {
   set_.Canonicalize();
@@ -413,7 +434,7 @@ RegExpNode* RegExpCharacterClass::ToNode(RegExpCompiler* compiler,
       return UnanchoredAdvance(compiler, on_success);
     } else {
       ChoiceNode* result = new (zone) ChoiceNode(2, zone);
-      UnicodeRangeSplitter splitter(zone, ranges);
+      UnicodeRangeSplitter splitter(ranges);
       AddBmpCharacters(compiler, result, on_success, &splitter);
       AddNonBmpSurrogatePairs(compiler, result, on_success, &splitter);
       AddLoneLeadSurrogates(compiler, result, on_success, &splitter);
@@ -916,9 +937,102 @@ RegExpNode* RegExpCapture::ToNode(RegExpTree* body, int index,
   return ActionNode::StorePosition(start_reg, true, body_node);
 }
 
+namespace {
+
+class AssertionSequenceRewriter final {
+ public:
+  // TODO(jgruber): Consider moving this to a separate AST tree rewriter pass
+  // instead of sprinkling rewrites into the AST->Node conversion process.
+  static void MaybeRewrite(ZoneList<RegExpTree*>* terms, Zone* zone) {
+    AssertionSequenceRewriter rewriter(terms, zone);
+
+    static constexpr int kNoIndex = -1;
+    int from = kNoIndex;
+
+    for (int i = 0; i < terms->length(); i++) {
+      RegExpTree* t = terms->at(i);
+      if (from == kNoIndex && t->IsAssertion()) {
+        from = i;  // Start a sequence.
+      } else if (from != kNoIndex && !t->IsAssertion()) {
+        // Terminate and process the sequence.
+        if (i - from > 1) rewriter.Rewrite(from, i);
+        from = kNoIndex;
+      }
+    }
+
+    if (from != kNoIndex && terms->length() - from > 1) {
+      rewriter.Rewrite(from, terms->length());
+    }
+  }
+
+  // All assertions are zero width. A consecutive sequence of assertions is
+  // order-independent. There's two ways we can optimize here:
+  // 1. fold all identical assertions.
+  // 2. if any assertion combinations are known to fail (e.g. \b\B), the entire
+  //    sequence fails.
+  void Rewrite(int from, int to) {
+    DCHECK_GT(to, from + 1);
+
+    // Bitfield of all seen assertions.
+    uint32_t seen_assertions = 0;
+    STATIC_ASSERT(RegExpAssertion::LAST_TYPE < kUInt32Size * kBitsPerByte);
+
+    // Flags must match for folding.
+    JSRegExp::Flags flags = terms_->at(from)->AsAssertion()->flags();
+    bool saw_mismatched_flags = false;
+
+    for (int i = from; i < to; i++) {
+      RegExpAssertion* t = terms_->at(i)->AsAssertion();
+      if (t->flags() != flags) saw_mismatched_flags = true;
+      const uint32_t bit = 1 << t->assertion_type();
+
+      if ((seen_assertions & bit) && !saw_mismatched_flags) {
+        // Fold duplicates.
+        terms_->Set(i, new (zone_) RegExpEmpty());
+      }
+
+      seen_assertions |= bit;
+    }
+
+    // Collapse failures.
+    const uint32_t always_fails_mask =
+        1 << RegExpAssertion::BOUNDARY | 1 << RegExpAssertion::NON_BOUNDARY;
+    if ((seen_assertions & always_fails_mask) == always_fails_mask) {
+      ReplaceSequenceWithFailure(from, to);
+    }
+  }
+
+  void ReplaceSequenceWithFailure(int from, int to) {
+    // Replace the entire sequence with a single node that always fails.
+    // TODO(jgruber): Consider adding an explicit Fail kind. Until then, the
+    // negated '*' (everything) range serves the purpose.
+    ZoneList<CharacterRange>* ranges =
+        new (zone_) ZoneList<CharacterRange>(0, zone_);
+    RegExpCharacterClass* cc =
+        new (zone_) RegExpCharacterClass(zone_, ranges, JSRegExp::Flags());
+    terms_->Set(from, cc);
+
+    // Zero out the rest.
+    RegExpEmpty* empty = new (zone_) RegExpEmpty();
+    for (int i = from + 1; i < to; i++) terms_->Set(i, empty);
+  }
+
+ private:
+  AssertionSequenceRewriter(ZoneList<RegExpTree*>* terms, Zone* zone)
+      : zone_(zone), terms_(terms) {}
+
+  Zone* zone_;
+  ZoneList<RegExpTree*>* terms_;
+};
+
+}  // namespace
+
 RegExpNode* RegExpAlternative::ToNode(RegExpCompiler* compiler,
                                       RegExpNode* on_success) {
   ZoneList<RegExpTree*>* children = nodes();
+
+  AssertionSequenceRewriter::MaybeRewrite(children, compiler->zone());
+
   RegExpNode* current = on_success;
   if (compiler->read_backward()) {
     for (int i = 0; i < children->length(); i++) {
@@ -1026,6 +1140,39 @@ Vector<const int> CharacterRange::GetWordBounds() {
   return Vector<const int>(kWordRanges, kWordRangeCount - 1);
 }
 
+#ifdef V8_INTL_SUPPORT
+struct IgnoreSet {
+  IgnoreSet() : set(BuildIgnoreSet()) {}
+  const icu::UnicodeSet set;
+};
+
+struct SpecialAddSet {
+  SpecialAddSet() : set(BuildSpecialAddSet()) {}
+  const icu::UnicodeSet set;
+};
+
+icu::UnicodeSet BuildAsciiAToZSet() {
+  icu::UnicodeSet set('a', 'z');
+  set.add('A', 'Z');
+  set.freeze();
+  return set;
+}
+
+struct AsciiAToZSet {
+  AsciiAToZSet() : set(BuildAsciiAToZSet()) {}
+  const icu::UnicodeSet set;
+};
+
+static base::LazyInstance<IgnoreSet>::type ignore_set =
+    LAZY_INSTANCE_INITIALIZER;
+
+static base::LazyInstance<SpecialAddSet>::type special_add_set =
+    LAZY_INSTANCE_INITIALIZER;
+
+static base::LazyInstance<AsciiAToZSet>::type ascii_a_to_z_set =
+    LAZY_INSTANCE_INITIALIZER;
+#endif  // V8_INTL_SUPPORT
+
 // static
 void CharacterRange::AddCaseEquivalents(Isolate* isolate, Zone* zone,
                                         ZoneList<CharacterRange>* ranges,
@@ -1033,58 +1180,100 @@ void CharacterRange::AddCaseEquivalents(Isolate* isolate, Zone* zone,
   CharacterRange::Canonicalize(ranges);
   int range_count = ranges->length();
 #ifdef V8_INTL_SUPPORT
-  icu::UnicodeSet already_added;
   icu::UnicodeSet others;
   for (int i = 0; i < range_count; i++) {
     CharacterRange range = ranges->at(i);
-    uc32 bottom = range.from();
-    if (bottom > String::kMaxUtf16CodeUnit) continue;
-    uc32 top = Min(range.to(), String::kMaxUtf16CodeUnit);
+    uc32 from = range.from();
+    if (from > String::kMaxUtf16CodeUnit) continue;
+    uc32 to = Min(range.to(), String::kMaxUtf16CodeUnit);
     // Nothing to be done for surrogates.
-    if (bottom >= kLeadSurrogateStart && top <= kTrailSurrogateEnd) continue;
+    if (from >= kLeadSurrogateStart && to <= kTrailSurrogateEnd) continue;
     if (is_one_byte && !RangeContainsLatin1Equivalents(range)) {
-      if (bottom > String::kMaxOneByteCharCode) continue;
-      if (top > String::kMaxOneByteCharCode) top = String::kMaxOneByteCharCode;
+      if (from > String::kMaxOneByteCharCode) continue;
+      if (to > String::kMaxOneByteCharCode) to = String::kMaxOneByteCharCode;
     }
-    already_added.add(bottom, top);
-    icu::Locale locale = icu::Locale::getRoot();
-    while (bottom <= top) {
-      icu::UnicodeString upper(bottom);
-      upper.toUpper(locale);
-      icu::UnicodeSet expanded(bottom, bottom);
-      expanded.closeOver(USET_CASE_INSENSITIVE);
-      for (int32_t i = 0; i < expanded.getRangeCount(); i++) {
-        UChar32 start = expanded.getRangeStart(i);
-        UChar32 end = expanded.getRangeEnd(i);
-        while (start <= end) {
-          icu::UnicodeString upper2(start);
-          upper2.toUpper(locale);
-          // Only add if the upper case are the same.
-          if (upper[0] == upper2[0]) {
-            // #sec-runtime-semantics-canonicalize-ch
-            // 3.g. If the numeric value of ch ≥ 128 and the numeric value of
-            // cu < 128, return ch.
-            if (bottom >= 128 && start < 128) {
-              others.add(bottom);
-            } else {
-              // 3.h. 3.h. 3.h. Return cu.
-              others.add(start);
-            }
-          }
-          start++;
-        }
-      }
-      bottom++;
+    others.add(from, to);
+  }
+
+  // Set of characters already added to ranges that do not need to be added
+  // again.
+  icu::UnicodeSet already_added(others);
+
+  // Set of characters in ranges that are in the 52 ASCII characters [a-zA-Z].
+  icu::UnicodeSet in_ascii_a_to_z(others);
+  in_ascii_a_to_z.retainAll(ascii_a_to_z_set.Pointer()->set);
+
+  // Remove all chars in [a-zA-Z] from others.
+  others.removeAll(in_ascii_a_to_z);
+
+  // Set of characters in ranges that are overlapping with special add set.
+  icu::UnicodeSet in_special_add(others);
+  in_special_add.retainAll(special_add_set.Pointer()->set);
+
+  others.removeAll(in_special_add);
+
+  // Ignore all chars in ignore set.
+  others.removeAll(ignore_set.Pointer()->set);
+
+  // For most of the chars in ranges that is still in others, find the case
+  // equivlant set by calling closeOver(USET_CASE_INSENSITIVE).
+  others.closeOver(USET_CASE_INSENSITIVE);
+
+  // Because closeOver(USET_CASE_INSENSITIVE) may add ASCII [a-zA-Z] to others,
+  // but ECMA262 "i" mode won't consider that, remove them from others.
+  // Ex: U+017F add 'S' and 's' to others.
+  others.removeAll(ascii_a_to_z_set.Pointer()->set);
+
+  // Special handling for in_ascii_a_to_z.
+  for (int32_t i = 0; i < in_ascii_a_to_z.getRangeCount(); i++) {
+    UChar32 start = in_ascii_a_to_z.getRangeStart(i);
+    UChar32 end = in_ascii_a_to_z.getRangeEnd(i);
+    // Check if it is uppercase A-Z by checking bit 6.
+    if (start & 0x0020) {
+      // Add the lowercases
+      others.add(start & 0x005F, end & 0x005F);
+    } else {
+      // Add the uppercases
+      others.add(start | 0x0020, end | 0x0020);
     }
   }
+
+  // Special handling for chars in "Special Add" set.
+  for (int32_t i = 0; i < in_special_add.getRangeCount(); i++) {
+    UChar32 end = in_special_add.getRangeEnd(i);
+    for (UChar32 ch = in_special_add.getRangeStart(i); ch <= end; ch++) {
+      // Add the uppercase of this character if itself is not an uppercase
+      // character.
+      // Note: The if condiction cannot be u_islower(ch) because ch could be
+      // neither uppercase nor lowercase but Mn.
+      if (!u_isupper(ch)) {
+        others.add(u_toupper(ch));
+      }
+      icu::UnicodeSet candidates(ch, ch);
+      candidates.closeOver(USET_CASE_INSENSITIVE);
+      for (int32_t j = 0; j < candidates.getRangeCount(); j++) {
+        UChar32 end2 = candidates.getRangeEnd(j);
+        for (UChar32 ch2 = candidates.getRangeStart(j); ch2 <= end2; ch2++) {
+          // Add character that is not uppercase to others.
+          if (!u_isupper(ch2)) {
+            others.add(ch2);
+          }
+        }
+      }
+    }
+  }
+
+  // Remove all characters which already in the ranges.
   others.removeAll(already_added);
+
+  // Add others to the ranges
   for (int32_t i = 0; i < others.getRangeCount(); i++) {
-    UChar32 start = others.getRangeStart(i);
-    UChar32 end = others.getRangeEnd(i);
-    if (start == end) {
-      ranges->Add(CharacterRange::Singleton(start), zone);
+    UChar32 from = others.getRangeStart(i);
+    UChar32 to = others.getRangeEnd(i);
+    if (from == to) {
+      ranges->Add(CharacterRange::Singleton(from), zone);
     } else {
-      ranges->Add(CharacterRange::Range(start, end), zone);
+      ranges->Add(CharacterRange::Range(from, to), zone);
     }
   }
 #else
@@ -1438,8 +1627,8 @@ RegExpNode* RegExpQuantifier::ToNode(int min, int max, bool is_greedy,
   bool needs_counter = has_min || has_max;
   int reg_ctr = needs_counter ? compiler->AllocateRegister()
                               : RegExpCompiler::kNoRegister;
-  LoopChoiceNode* center = new (zone)
-      LoopChoiceNode(body->min_match() == 0, compiler->read_backward(), zone);
+  LoopChoiceNode* center = new (zone) LoopChoiceNode(
+      body->min_match() == 0, compiler->read_backward(), min, zone);
   if (not_at_start && !compiler->read_backward()) center->set_not_at_start();
   RegExpNode* loop_return =
       needs_counter ? static_cast<RegExpNode*>(
@@ -1479,7 +1668,7 @@ RegExpNode* RegExpQuantifier::ToNode(int min, int max, bool is_greedy,
     center->AddLoopAlternative(body_alt);
   }
   if (needs_counter) {
-    return ActionNode::SetRegister(reg_ctr, 0, center);
+    return ActionNode::SetRegisterForLoop(reg_ctr, 0, center);
   } else {
     return center;
   }

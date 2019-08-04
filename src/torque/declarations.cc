@@ -133,6 +133,19 @@ Generic* Declarations::LookupUniqueGeneric(const QualifiedName& name) {
                       "generic");
 }
 
+GenericStructType* Declarations::LookupUniqueGenericStructType(
+    const QualifiedName& name) {
+  return EnsureUnique(FilterDeclarables<GenericStructType>(Lookup(name)), name,
+                      "generic struct");
+}
+
+base::Optional<GenericStructType*> Declarations::TryLookupGenericStructType(
+    const QualifiedName& name) {
+  std::vector<GenericStructType*> results = TryLookup<GenericStructType>(name);
+  if (results.empty()) return base::nullopt;
+  return EnsureUnique(results, name.name, "generic struct");
+}
+
 Namespace* Declarations::DeclareNamespace(const std::string& name) {
   return Declare(name, std::unique_ptr<Namespace>(new Namespace(name)));
 }
@@ -276,6 +289,12 @@ NamespaceConstant* Declarations::DeclareNamespaceConstant(Identifier* name,
 Generic* Declarations::DeclareGeneric(const std::string& name,
                                       GenericDeclaration* generic) {
   return Declare(name, std::unique_ptr<Generic>(new Generic(name, generic)));
+}
+
+GenericStructType* Declarations::DeclareGenericStructType(
+    const std::string& name, StructDeclaration* decl) {
+  return Declare(name, std::unique_ptr<GenericStructType>(
+                           new GenericStructType(name, decl)));
 }
 
 std::string Declarations::GetGeneratedCallableName(

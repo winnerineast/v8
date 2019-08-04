@@ -440,7 +440,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
     Label ok;
     AndP(r0, dst, Operand(kPointerSize - 1));
     beq(&ok, Label::kNear);
-    stop("Unaligned cell in write barrier");
+    stop();
     bind(&ok);
   }
 
@@ -576,8 +576,9 @@ void MacroAssembler::RecordWrite(Register object, Register address,
     Check(eq, AbortReason::kWrongAddressOrValuePassedToRecordWrite);
   }
 
-  if (remembered_set_action == OMIT_REMEMBERED_SET &&
-      !FLAG_incremental_marking) {
+  if ((remembered_set_action == OMIT_REMEMBERED_SET &&
+       !FLAG_incremental_marking) ||
+      FLAG_disable_write_barriers) {
     return;
   }
   // First, check if a write barrier is even needed. The tests below
@@ -1670,15 +1671,15 @@ void TurboAssembler::Check(Condition cond, AbortReason reason, CRegister cr) {
 void TurboAssembler::Abort(AbortReason reason) {
   Label abort_start;
   bind(&abort_start);
-  const char* msg = GetAbortReason(reason);
 #ifdef DEBUG
+  const char* msg = GetAbortReason(reason);
   RecordComment("Abort message: ");
   RecordComment(msg);
 #endif
 
   // Avoid emitting call to builtin if requested.
   if (trap_on_abort()) {
-    stop(msg);
+    stop();
     return;
   }
 
@@ -4332,7 +4333,7 @@ void TurboAssembler::JumpIfLessThan(Register x, int32_t y, Label* dest) {
   blt(dest);
 }
 
-void TurboAssembler::CallBuiltinByIndex(Register builtin_index) {
+void TurboAssembler::LoadEntryFromBuiltinIndex(Register builtin_index) {
   STATIC_ASSERT(kSystemPointerSize == 8);
   STATIC_ASSERT(kSmiShiftSize == 31);
   STATIC_ASSERT(kSmiTagSize == 1);
@@ -4345,6 +4346,10 @@ void TurboAssembler::CallBuiltinByIndex(Register builtin_index) {
   AddP(builtin_index, builtin_index,
        Operand(IsolateData::builtin_entry_table_offset()));
   LoadP(builtin_index, MemOperand(kRootRegister, builtin_index));
+}
+
+void TurboAssembler::CallBuiltinByIndex(Register builtin_index) {
+  LoadEntryFromBuiltinIndex(builtin_index);
   Call(builtin_index);
 }
 

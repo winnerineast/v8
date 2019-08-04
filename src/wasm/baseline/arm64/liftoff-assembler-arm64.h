@@ -172,7 +172,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(int offset,
   patching_assembler.PatchSubSp(bytes);
 }
 
-void LiftoffAssembler::FinishCode() { CheckConstPool(true, false); }
+void LiftoffAssembler::FinishCode() { ForceConstantPoolEmissionWithoutJump(); }
 
 void LiftoffAssembler::AbortCompilation() { AbortedCodeGeneration(); }
 
@@ -210,7 +210,9 @@ void LiftoffAssembler::LoadFromInstance(Register dst, uint32_t offset,
 
 void LiftoffAssembler::LoadTaggedPointerFromInstance(Register dst,
                                                      uint32_t offset) {
-  LoadFromInstance(dst, offset, kTaggedSize);
+  DCHECK_LE(offset, kMaxInt);
+  Ldr(dst, liftoff::GetInstanceOperand());
+  LoadTaggedPointerField(dst, MemOperand(dst, offset));
 }
 
 void LiftoffAssembler::SpillInstance(Register instance) {
