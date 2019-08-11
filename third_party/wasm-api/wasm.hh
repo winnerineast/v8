@@ -111,7 +111,7 @@ class vec {
   size_t size_;
   std::unique_ptr<T[]> data_;
 
-#ifdef DEBUG
+#ifdef WASM_API_DEBUG
   void make_data();
   void free_data();
 #else
@@ -208,6 +208,7 @@ public:
     return v;
   }
 
+  // TODO(mvsc): MVSC requires this special case:
   static auto make() -> vec {
     return vec(0);
   }
@@ -274,7 +275,7 @@ public:
 
 // Type attributes
 
-enum Mutability { CONST, VAR };
+enum Mutability : uint8_t { CONST, VAR };
 
 struct Limits {
   uint32_t min;
@@ -287,7 +288,10 @@ struct Limits {
 
 // Value Types
 
-enum ValKind { I32, I64, F32, F64, ANYREF, FUNCREF };
+enum ValKind : uint8_t {
+  I32, I64, F32, F64,
+  ANYREF = 128, FUNCREF,
+};
 
 inline bool is_num(ValKind k) { return k < ANYREF; }
 inline bool is_ref(ValKind k) { return k >= ANYREF; }
@@ -310,7 +314,7 @@ public:
 
 // External Types
 
-enum ExternKind {
+enum ExternKind : uint8_t {
   EXTERN_FUNC, EXTERN_GLOBAL, EXTERN_TABLE, EXTERN_MEMORY
 };
 
@@ -342,8 +346,6 @@ public:
 
 
 // Function Types
-
-enum class arrow { ARROW };
 
 class FuncType : public ExternType {
 public:
@@ -454,6 +456,7 @@ public:
   void operator delete(void*);
 
   auto copy() const -> own<Ref*>;
+  auto same(const Ref*) const -> bool;
 
   auto get_host_info() const -> void*;
   void set_host_info(void* info, void (*finalizer)(void*) = nullptr);
@@ -537,6 +540,8 @@ public:
 
   auto copy() const -> Val {
     if (is_ref() && impl_.ref != nullptr) {
+      // TODO(mvsc): MVSC cannot handle this:
+      // impl impl = {.ref = impl_.ref->copy().release()};
       impl impl;
       impl.ref = impl_.ref->copy().release();
       return Val(kind_, impl);
@@ -580,6 +585,22 @@ template<> inline auto Val::get<uint64_t>() const -> uint64_t {
 
 using Message = vec<byte_t>;  // null terminated
 
+class Instance;
+
+class Frame {
+public:
+  Frame() = delete;
+  ~Frame();
+  void operator delete(void*);
+
+  auto copy() const -> own<Frame*>;
+
+  auto instance() const -> Instance*;
+  auto func_index() const -> uint32_t;
+  auto func_offset() const -> size_t;
+  auto module_offset() const -> size_t;
+};
+
 class Trap : public Ref {
 public:
   Trap() = delete;
@@ -589,6 +610,8 @@ public:
   auto copy() const -> own<Trap*>;
 
   auto message() const -> Message;
+  auto origin() const -> own<Frame*>;  // may be null
+  auto trace() const -> vec<Frame*>;  // may be empty, origin first
 };
 
 

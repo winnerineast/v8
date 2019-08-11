@@ -3,13 +3,6 @@
 # found in the LICENSE file.
 
 [
-[ALWAYS, {
-  # https://crbug.com/986063.
-  # TODO(szuend): Re-enable test once the fix has landed.
-  'AccessRegressionTest.InstantiatedLazyAccessorPairsHaveCorrectNativeContext': [FAIL],
-  'AccessRegressionTest.InstantiatedLazyAccessorPairsHaveCorrectNativeContextDebug': [FAIL],
-}],  # ALWAYS
-
 ['system == macos and asan', {
   # BUG(820416).
   'BitsDeathTest*': [SKIP],
@@ -45,5 +38,12 @@
   # BUG(893437).
   'Torque*': [SKIP],
 }],  # 'system == windows and asan'
+
+##############################################################################
+['tsan == True', {
+  # https://crbug.com/v8/9380
+  # The test is broken and needs to be fixed to use separate isolates.
+  'BackingStoreTest.RacyGrowWasmMemoryInPlace': [SKIP],
+}],  # 'tsan == True'
 
 ]

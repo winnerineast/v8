@@ -128,6 +128,8 @@ Reduction JSNativeContextSpecialization::Reduce(Node* node) {
       return ReduceJSToObject(node);
     case IrOpcode::kJSToString:
       return ReduceJSToString(node);
+    case IrOpcode::kJSGetIterator:
+      return ReduceJSGetIterator(node);
     default:
       break;
   }
@@ -381,7 +383,9 @@ Reduction JSNativeContextSpecialization::ReduceJSGetSuperConstructor(
 }
 
 Reduction JSNativeContextSpecialization::ReduceJSInstanceOf(Node* node) {
-  DisallowHeapAccessIf no_heap_access(FLAG_concurrent_inlining);
+  // TODO(neis): Eliminate heap accesses.
+  AllowHandleDereference allow_handle_dereference;
+  AllowHandleAllocation allow_handle_allocation;
 
   DCHECK_EQ(IrOpcode::kJSInstanceOf, node->opcode());
   FeedbackParameter const& p = FeedbackParameterOf(node->op());
@@ -399,13 +403,10 @@ Reduction JSNativeContextSpecialization::ReduceJSInstanceOf(Node* node) {
   if (m.HasValue() && m.Ref(broker()).IsJSObject()) {
     receiver = m.Ref(broker()).AsJSObject().object();
   } else if (p.feedback().IsValid()) {
-    ProcessedFeedback const* feedback =
-        broker()->GetFeedbackForInstanceOf(FeedbackSource(p.feedback()));
-    if (feedback->IsInsufficient()) return NoChange();
-    base::Optional<JSObjectRef> maybe_receiver =
-        feedback->AsInstanceOf()->value();
-    if (!maybe_receiver.has_value()) return NoChange();
-    receiver = maybe_receiver->object();
+    FeedbackNexus nexus(p.feedback().vector(), p.feedback().slot());
+    if (!nexus.GetConstructorFeedback().ToHandle(&receiver)) {
+      return NoChange();
+    }
   } else {
     return NoChange();
   }
@@ -1074,7 +1075,8 @@ Reduction JSNativeContextSpecialization::ReduceNamedAccess(
          node->opcode() == IrOpcode::kJSLoadProperty ||
          node->opcode() == IrOpcode::kJSStoreProperty ||
          node->opcode() == IrOpcode::kJSStoreNamedOwn ||
-         node->opcode() == IrOpcode::kJSHasProperty);
+         node->opcode() == IrOpcode::kJSHasProperty ||
+         node->opcode() == IrOpcode::kJSGetIterator);
   Node* receiver = NodeProperties::GetValueInput(node, 0);
   Node* context = NodeProperties::GetContextInput(node);
   Node* frame_state = NodeProperties::GetFrameStateInput(node);
@@ -1380,6 +1382,16 @@ Reduction JSNativeContextSpecialization::ReduceJSLoadNamed(Node* node) {
   return ReduceNamedAccessFromNexus(node, jsgraph()->Dead(),
                                     FeedbackSource(p.feedback()), name,
                                     AccessMode::kLoad);
+}
+
+Reduction JSNativeContextSpecialization::ReduceJSGetIterator(Node* node) {
+  DisallowHeapAccessIf no_heap_access(FLAG_concurrent_inlining);
+  DCHECK_EQ(IrOpcode::kJSGetIterator, node->opcode());
+  PropertyAccess const& p = PropertyAccessOf(node->op());
+  NameRef name(broker(), factory()->iterator_symbol());
+
+  return ReducePropertyAccess(node, nullptr, name, jsgraph()->Dead(),
+                              FeedbackSource(p.feedback()), AccessMode::kLoad);
 }
 
 Reduction JSNativeContextSpecialization::ReduceJSStoreNamed(Node* node) {
@@ -1757,7 +1769,8 @@ Reduction JSNativeContextSpecialization::ReducePropertyAccess(
          node->opcode() == IrOpcode::kJSHasProperty ||
          node->opcode() == IrOpcode::kJSLoadNamed ||
          node->opcode() == IrOpcode::kJSStoreNamed ||
-         node->opcode() == IrOpcode::kJSStoreNamedOwn);
+         node->opcode() == IrOpcode::kJSStoreNamedOwn ||
+         node->opcode() == IrOpcode::kJSGetIterator);
 
   Node* receiver = NodeProperties::GetValueInput(node, 0);
   Node* effect = NodeProperties::GetEffectInput(node);
@@ -1810,7 +1823,7 @@ Reduction JSNativeContextSpecialization::ReducePropertyAccess(
                access_mode);
       return ReduceElementAccess(node, key, value,
                                  *processed->AsElementAccess());
-    default:
+    case ProcessedFeedback::kGlobalAccess:
       UNREACHABLE();
   }
 }

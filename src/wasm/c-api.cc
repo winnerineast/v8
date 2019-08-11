@@ -29,6 +29,7 @@
 #include "include/libplatform/libplatform.h"
 #include "src/api/api-inl.h"
 #include "src/compiler/wasm-compiler.h"
+#include "src/objects/stack-frame-info-inl.h"
 #include "src/wasm/leb-helper.h"
 #include "src/wasm/module-instantiate.h"
 #include "src/wasm/wasm-arguments.h"
@@ -36,6 +37,10 @@
 #include "src/wasm/wasm-objects.h"
 #include "src/wasm/wasm-result.h"
 #include "src/wasm/wasm-serialization.h"
+
+#ifdef WASM_API_DEBUG
+#error "WASM_API_DEBUG is unsupported"
+#endif
 
 namespace wasm {
 
@@ -187,14 +192,6 @@ auto seal(const typename implement<C>::type* x) -> const C* {
   return reinterpret_cast<const C*>(x);
 }
 
-#ifdef DEBUG
-template <class T>
-void vec<T>::make_data() {}
-
-template <class T>
-void vec<T>::free_data() {}
-#endif
-
 ///////////////////////////////////////////////////////////////////////////////
 // Runtime Environment
 
@@ -309,6 +306,10 @@ auto Store::make(Engine*) -> own<Store*> {
   // and hence must not be called by anything reachable via this file.
   store->context()->Enter();
   isolate->SetData(0, store.get());
+  // We want stack traces for traps.
+  constexpr int kStackLimit = 10;
+  isolate->SetCaptureStackTraceForUncaughtExceptions(true, kStackLimit,
+                                                     v8::StackTrace::kOverview);
 
   return make_own(seal<Store>(store.release()));
 }
@@ -329,18 +330,43 @@ struct implement<ValType> {
   using type = ValTypeImpl;
 };
 
-ValTypeImpl* valtypes[] = {
-    new ValTypeImpl(I32), new ValTypeImpl(I64),    new ValTypeImpl(F32),
-    new ValTypeImpl(F64), new ValTypeImpl(ANYREF), new ValTypeImpl(FUNCREF),
-};
+ValTypeImpl* valtype_i32 = new ValTypeImpl(I32);
+ValTypeImpl* valtype_i64 = new ValTypeImpl(I64);
+ValTypeImpl* valtype_f32 = new ValTypeImpl(F32);
+ValTypeImpl* valtype_f64 = new ValTypeImpl(F64);
+ValTypeImpl* valtype_anyref = new ValTypeImpl(ANYREF);
+ValTypeImpl* valtype_funcref = new ValTypeImpl(FUNCREF);
 
 ValType::~ValType() {}
 
 void ValType::operator delete(void*) {}
 
-auto ValType::make(ValKind k) -> own<ValType*> {
-  auto result = seal<ValType>(valtypes[k]);
-  return own<ValType*>(result);
+own<ValType*> ValType::make(ValKind k) {
+  ValTypeImpl* valtype;
+  switch (k) {
+    case I32:
+      valtype = valtype_i32;
+      break;
+    case I64:
+      valtype = valtype_i64;
+      break;
+    case F32:
+      valtype = valtype_f32;
+      break;
+    case F64:
+      valtype = valtype_f64;
+      break;
+    case ANYREF:
+      valtype = valtype_anyref;
+      break;
+    case FUNCREF:
+      valtype = valtype_funcref;
+      break;
+    default:
+      // TODO(wasm+): support new value types
+      UNREACHABLE();
+  }
+  return own<ValType*>(seal<ValType>(valtype));
 }
 
 auto ValType::copy() const -> own<ValType*> { return make(kind()); }
@@ -757,6 +783,11 @@ void Ref::operator delete(void* p) {}
 
 auto Ref::copy() const -> own<Ref*> { return impl(this)->copy(); }
 
+auto Ref::same(const Ref* that) const -> bool {
+  i::HandleScope handle_scope(impl(this)->isolate());
+  return impl(this)->v8_object()->SameValue(*impl(that)->v8_object());
+}
+
 auto Ref::get_host_info() const -> void* { return impl(this)->get_host_info(); }
 
 void Ref::set_host_info(void* info, void (*finalizer)(void*)) {
@@ -765,6 +796,52 @@ void Ref::set_host_info(void* info, void (*finalizer)(void*)) {
 
 ///////////////////////////////////////////////////////////////////////////////
 // Runtime Objects
+
+// Frames
+
+namespace {
+
+struct FrameImpl {
+  FrameImpl(own<Instance*>&& instance, uint32_t func_index, size_t func_offset,
+            size_t module_offset)
+      : instance(std::move(instance)),
+        func_index(func_index),
+        func_offset(func_offset),
+        module_offset(module_offset) {}
+
+  ~FrameImpl() {}
+
+  own<Instance*> instance;
+  uint32_t func_index;
+  size_t func_offset;
+  size_t module_offset;
+};
+
+}  // namespace
+
+template <>
+struct implement<Frame> {
+  using type = FrameImpl;
+};
+
+Frame::~Frame() { impl(this)->~FrameImpl(); }
+
+void Frame::operator delete(void* p) { ::operator delete(p); }
+
+own<Frame*> Frame::copy() const {
+  auto self = impl(this);
+  return own<Frame*>(seal<Frame>(
+      new (std::nothrow) FrameImpl(self->instance->copy(), self->func_index,
+                                   self->func_offset, self->module_offset)));
+}
+
+Instance* Frame::instance() const { return impl(this)->instance.get(); }
+
+uint32_t Frame::func_index() const { return impl(this)->func_index; }
+
+size_t Frame::func_offset() const { return impl(this)->func_offset; }
+
+size_t Frame::module_offset() const { return impl(this)->module_offset; }
 
 // Traps
 
@@ -799,6 +876,56 @@ auto Trap::message() const -> Message {
   std::unique_ptr<char[]> utf8 =
       result->ToCString(i::DISALLOW_NULLS, i::FAST_STRING_TRAVERSAL, &length);
   return vec<byte_t>::adopt(length, utf8.release());
+}
+
+namespace {
+
+own<Instance*> GetInstance(StoreImpl* store,
+                           i::Handle<i::WasmInstanceObject> instance);
+
+own<Frame*> CreateFrameFromInternal(i::Handle<i::FixedArray> frames, int index,
+                                    i::Isolate* isolate, StoreImpl* store) {
+  i::Handle<i::StackTraceFrame> frame(i::StackTraceFrame::cast(frames->get(0)),
+                                      isolate);
+  i::Handle<i::WasmInstanceObject> instance =
+      i::StackTraceFrame::GetWasmInstance(frame);
+  uint32_t func_index = i::StackTraceFrame::GetLineNumber(frame);
+  size_t func_offset = i::StackTraceFrame::GetFunctionOffset(frame);
+  size_t module_offset = i::StackTraceFrame::GetColumnNumber(frame);
+  return own<Frame*>(seal<Frame>(new (std::nothrow) FrameImpl(
+      GetInstance(store, instance), func_index, func_offset, module_offset)));
+}
+
+}  // namespace
+
+own<Frame*> Trap::origin() const {
+  i::Isolate* isolate = impl(this)->isolate();
+  i::HandleScope handle_scope(isolate);
+
+  i::Handle<i::JSMessageObject> message =
+      isolate->CreateMessage(impl(this)->v8_object(), nullptr);
+  i::Handle<i::FixedArray> frames(i::FixedArray::cast(message->stack_frames()),
+                                  isolate);
+  DCHECK_GT(frames->length(), 0);
+  return CreateFrameFromInternal(frames, 0, isolate, impl(this)->store());
+}
+
+vec<Frame*> Trap::trace() const {
+  i::Isolate* isolate = impl(this)->isolate();
+  i::HandleScope handle_scope(isolate);
+
+  i::Handle<i::JSMessageObject> message =
+      isolate->CreateMessage(impl(this)->v8_object(), nullptr);
+  i::Handle<i::FixedArray> frames(i::FixedArray::cast(message->stack_frames()),
+                                  isolate);
+  int num_frames = frames->length();
+  DCHECK_GT(num_frames, 0);
+  vec<Frame*> result = vec<Frame*>::make_uninitialized(num_frames);
+  for (int i = 0; i < num_frames; i++) {
+    result[i] =
+        CreateFrameFromInternal(frames, i, isolate, impl(this)->store());
+  }
+  return result;
 }
 
 // Foreign Objects
@@ -1734,10 +1861,9 @@ auto Memory::make(Store* store_abs, const MemoryType* type) -> own<Memory*> {
     if (maximum < minimum) return nullptr;
     if (maximum > i::wasm::kSpecMaxWasmMemoryPages) return nullptr;
   }
-  // TODO(wasm+): Support shared memory.
-  i::SharedFlag shared = i::SharedFlag::kNotShared;
+  bool is_shared = false;  // TODO(wasm+): Support shared memory.
   i::Handle<i::WasmMemoryObject> memory_obj;
-  if (!i::WasmMemoryObject::New(isolate, minimum, maximum, shared)
+  if (!i::WasmMemoryObject::New(isolate, minimum, maximum, is_shared)
            .ToHandle(&memory_obj)) {
     return own<Memory*>();
   }
@@ -1827,6 +1953,15 @@ auto Instance::make(Store* store_abs, const Module* module_abs,
           .ToHandleChecked();
   return implement<Instance>::type::make(store, instance_obj);
 }
+
+namespace {
+
+own<Instance*> GetInstance(StoreImpl* store,
+                           i::Handle<i::WasmInstanceObject> instance) {
+  return implement<Instance>::type::make(store, instance);
+}
+
+}  // namespace
 
 auto Instance::exports() const -> vec<Extern*> {
   const implement<Instance>::type* instance = impl(this);
@@ -2096,7 +2231,7 @@ extern "C++" inline auto hide(wasm::Mutability mutability)
   return static_cast<wasm_mutability_t>(mutability);
 }
 
-extern "C++" inline auto reveal(wasm_mutability_t mutability)
+extern "C++" inline auto reveal(wasm_mutability_enum mutability)
     -> wasm::Mutability {
   return static_cast<wasm::Mutability>(mutability);
 }
@@ -2114,7 +2249,7 @@ extern "C++" inline auto hide(wasm::ValKind kind) -> wasm_valkind_t {
   return static_cast<wasm_valkind_t>(kind);
 }
 
-extern "C++" inline auto reveal(wasm_valkind_t kind) -> wasm::ValKind {
+extern "C++" inline auto reveal(wasm_valkind_enum kind) -> wasm::ValKind {
   return static_cast<wasm::ValKind>(kind);
 }
 
@@ -2122,7 +2257,7 @@ extern "C++" inline auto hide(wasm::ExternKind kind) -> wasm_externkind_t {
   return static_cast<wasm_externkind_t>(kind);
 }
 
-extern "C++" inline auto reveal(wasm_externkind_t kind) -> wasm::ExternKind {
+extern "C++" inline auto reveal(wasm_externkind_enum kind) -> wasm::ExternKind {
   return static_cast<wasm::ExternKind>(kind);
 }
 
@@ -2141,7 +2276,8 @@ extern "C++" inline auto reveal(wasm_externkind_t kind) -> wasm::ExternKind {
 WASM_DEFINE_TYPE(valtype, wasm::ValType)
 
 wasm_valtype_t* wasm_valtype_new(wasm_valkind_t k) {
-  return release(wasm::ValType::make(reveal(k)));
+  return release(
+      wasm::ValType::make(reveal(static_cast<wasm_valkind_enum>(k))));
 }
 
 wasm_valkind_t wasm_valtype_kind(const wasm_valtype_t* t) {
@@ -2171,7 +2307,8 @@ WASM_DEFINE_TYPE(globaltype, wasm::GlobalType)
 
 wasm_globaltype_t* wasm_globaltype_new(wasm_valtype_t* content,
                                        wasm_mutability_t mutability) {
-  return release(wasm::GlobalType::make(adopt(content), reveal(mutability)));
+  return release(wasm::GlobalType::make(
+      adopt(content), reveal(static_cast<wasm_mutability_enum>(mutability))));
 }
 
 const wasm_valtype_t* wasm_globaltype_content(const wasm_globaltype_t* gt) {
@@ -2346,6 +2483,11 @@ const wasm_externtype_t* wasm_exporttype_type(const wasm_exporttype_t* et) {
     return release(t->copy());                                       \
   }                                                                  \
                                                                      \
+  bool wasm_##name##_same(const wasm_##name##_t* t1,                 \
+                          const wasm_##name##_t* t2) {               \
+    return t1->same(t2);                                             \
+  }                                                                  \
+                                                                     \
   void* wasm_##name##_get_host_info(const wasm_##name##_t* r) {      \
     return r->get_host_info();                                       \
   }                                                                  \
@@ -2385,7 +2527,7 @@ WASM_DEFINE_REF_BASE(ref, wasm::Ref)
 extern "C++" {
 
 inline auto is_empty(wasm_val_t v) -> bool {
-  return !is_ref(reveal(v.kind)) || !v.of.ref;
+  return !is_ref(reveal(static_cast<wasm_valkind_enum>(v.kind))) || !v.of.ref;
 }
 
 inline auto hide(wasm::Val v) -> wasm_val_t {
@@ -2439,7 +2581,7 @@ inline auto release(wasm::Val v) -> wasm_val_t {
 }
 
 inline auto adopt(wasm_val_t v) -> wasm::Val {
-  switch (reveal(v.kind)) {
+  switch (reveal(static_cast<wasm_valkind_enum>(v.kind))) {
     case wasm::I32:
       return wasm::Val(v.of.i32);
     case wasm::I64:
@@ -2467,7 +2609,7 @@ struct borrowed_val {
 
 inline auto borrow(const wasm_val_t* v) -> borrowed_val {
   wasm::Val v2;
-  switch (reveal(v->kind)) {
+  switch (reveal(static_cast<wasm_valkind_enum>(v->kind))) {
     case wasm::I32:
       v2 = wasm::Val(v->of.i32);
       break;
@@ -2514,18 +2656,44 @@ void wasm_val_vec_copy(wasm_val_vec_t* out, wasm_val_vec_t* v) {
 }
 
 void wasm_val_delete(wasm_val_t* v) {
-  if (is_ref(reveal(v->kind))) adopt(v->of.ref);
+  if (is_ref(reveal(static_cast<wasm_valkind_enum>(v->kind)))) {
+    adopt(v->of.ref);
+  }
 }
 
 void wasm_val_copy(wasm_val_t* out, const wasm_val_t* v) {
   *out = *v;
-  if (is_ref(reveal(v->kind))) {
+  if (is_ref(reveal(static_cast<wasm_valkind_enum>(v->kind)))) {
     out->of.ref = release(v->of.ref->copy());
   }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // Runtime Objects
+
+// Frames
+
+WASM_DEFINE_OWN(frame, wasm::Frame)
+WASM_DEFINE_VEC(frame, wasm::Frame, *)
+
+wasm_frame_t* wasm_frame_copy(const wasm_frame_t* frame) {
+  return release(frame->copy());
+}
+
+wasm_instance_t* wasm_frame_instance(const wasm_frame_t* frame);
+// Defined below along with wasm_instance_t.
+
+uint32_t wasm_frame_func_index(const wasm_frame_t* frame) {
+  return reveal(frame)->func_index();
+}
+
+size_t wasm_frame_func_offset(const wasm_frame_t* frame) {
+  return reveal(frame)->func_offset();
+}
+
+size_t wasm_frame_module_offset(const wasm_frame_t* frame) {
+  return reveal(frame)->module_offset();
+}
 
 // Traps
 
@@ -2538,6 +2706,14 @@ wasm_trap_t* wasm_trap_new(wasm_store_t* store, const wasm_message_t* message) {
 
 void wasm_trap_message(const wasm_trap_t* trap, wasm_message_t* out) {
   *out = release(reveal(trap)->message());
+}
+
+wasm_frame_t* wasm_trap_origin(const wasm_trap_t* trap) {
+  return release(reveal(trap)->origin());
+}
+
+void wasm_trap_trace(const wasm_trap_t* trap, wasm_frame_vec_t* out) {
+  *out = release(reveal(trap)->trace());
 }
 
 // Foreign Objects
@@ -2818,6 +2994,10 @@ wasm_instance_t* wasm_instance_new(wasm_store_t* store,
 void wasm_instance_exports(const wasm_instance_t* instance,
                            wasm_extern_vec_t* out) {
   *out = release(instance->exports());
+}
+
+wasm_instance_t* wasm_frame_instance(const wasm_frame_t* frame) {
+  return hide(reveal(frame)->instance());
 }
 
 #undef WASM_DEFINE_OWN

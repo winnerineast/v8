@@ -179,100 +179,6 @@ Reduction JSCallReducer::ReduceMathMinMax(Node* node, const Operator* op,
   return Replace(value);
 }
 
-// ES section #sec-math.hypot Math.hypot ( value1, value2, ...values )
-Reduction JSCallReducer::ReduceMathHypot(Node* node) {
-  CallParameters const& p = CallParametersOf(node->op());
-  if (p.speculation_mode() == SpeculationMode::kDisallowSpeculation) {
-    return NoChange();
-  }
-  if (node->op()->ValueInputCount() < 3) {
-    Node* value = jsgraph()->ZeroConstant();
-    ReplaceWithValue(node, value);
-    return Replace(value);
-  }
-  Node* effect = NodeProperties::GetEffectInput(node);
-  Node* control = NodeProperties::GetControlInput(node);
-  NodeVector values(graph()->zone());
-
-  Node* max = effect =
-      graph()->NewNode(simplified()->SpeculativeToNumber(
-                           NumberOperationHint::kNumberOrOddball, p.feedback()),
-                       NodeProperties::GetValueInput(node, 2), effect, control);
-  max = graph()->NewNode(simplified()->NumberAbs(), max);
-  values.push_back(max);
-  for (int i = 3; i < node->op()->ValueInputCount(); ++i) {
-    Node* input = effect = graph()->NewNode(
-        simplified()->SpeculativeToNumber(NumberOperationHint::kNumberOrOddball,
-                                          p.feedback()),
-        NodeProperties::GetValueInput(node, i), effect, control);
-    input = graph()->NewNode(simplified()->NumberAbs(), input);
-    values.push_back(input);
-
-    // Make sure {max} is NaN in the end in case any argument was NaN.
-    max = graph()->NewNode(
-        common()->Select(MachineRepresentation::kTagged),
-        graph()->NewNode(simplified()->NumberLessThanOrEqual(), input, max),
-        max, input);
-  }
-
-  Node* check0 = graph()->NewNode(simplified()->NumberEqual(), max,
-                                  jsgraph()->ZeroConstant());
-  Node* branch0 =
-      graph()->NewNode(common()->Branch(BranchHint::kFalse), check0, control);
-
-  Node* if_true0 = graph()->NewNode(common()->IfTrue(), branch0);
-  Node* vtrue0 = jsgraph()->ZeroConstant();
-
-  Node* if_false0 = graph()->NewNode(common()->IfFalse(), branch0);
-  Node* vfalse0;
-  {
-    Node* check1 = graph()->NewNode(simplified()->NumberEqual(), max,
-                                    jsgraph()->Constant(V8_INFINITY));
-    Node* branch1 = graph()->NewNode(common()->Branch(BranchHint::kFalse),
-                                     check1, if_false0);
-
-    Node* if_true1 = graph()->NewNode(common()->IfTrue(), branch1);
-    Node* vtrue1 = jsgraph()->Constant(V8_INFINITY);
-
-    Node* if_false1 = graph()->NewNode(common()->IfFalse(), branch1);
-    Node* vfalse1;
-    {
-      // Kahan summation to avoid rounding errors.
-      // Normalize the numbers to the largest one to avoid overflow.
-      Node* sum = jsgraph()->ZeroConstant();
-      Node* compensation = jsgraph()->ZeroConstant();
-      for (Node* value : values) {
-        Node* n = graph()->NewNode(simplified()->NumberDivide(), value, max);
-        Node* summand = graph()->NewNode(
-            simplified()->NumberSubtract(),
-            graph()->NewNode(simplified()->NumberMultiply(), n, n),
-            compensation);
-        Node* preliminary =
-            graph()->NewNode(simplified()->NumberAdd(), sum, summand);
-        compensation = graph()->NewNode(
-            simplified()->NumberSubtract(),
-            graph()->NewNode(simplified()->NumberSubtract(), preliminary, sum),
-            summand);
-        sum = preliminary;
-      }
-      vfalse1 = graph()->NewNode(
-          simplified()->NumberMultiply(),
-          graph()->NewNode(simplified()->NumberSqrt(), sum), max);
-    }
-
-    if_false0 = graph()->NewNode(common()->Merge(2), if_true1, if_false1);
-    vfalse0 = graph()->NewNode(common()->Phi(MachineRepresentation::kTagged, 2),
-                               vtrue1, vfalse1, if_false0);
-  }
-
-  control = graph()->NewNode(common()->Merge(2), if_true0, if_false0);
-  Node* value =
-      graph()->NewNode(common()->Phi(MachineRepresentation::kTagged, 2), vtrue0,
-                       vfalse0, control);
-  ReplaceWithValue(node, value, effect, control);
-  return Replace(value);
-}
-
 Reduction JSCallReducer::Reduce(Node* node) {
   switch (node->opcode()) {
     case IrOpcode::kJSConstruct:
@@ -2941,7 +2847,8 @@ Reduction JSCallReducer::ReduceCallApiFunction(
 
       // See if we can constant-fold the compatible receiver checks.
       HolderLookupResult api_holder =
-          function_template_info.LookupHolderOfExpectedType(first_receiver_map);
+          function_template_info.LookupHolderOfExpectedType(first_receiver_map,
+                                                            false);
       if (api_holder.lookup == CallOptimization::kHolderNotFound)
         return inference.NoChange();
 
@@ -2971,7 +2878,8 @@ Reduction JSCallReducer::ReduceCallApiFunction(
       for (size_t i = 1; i < receiver_maps.size(); ++i) {
         MapRef receiver_map(broker(), receiver_maps[i]);
         HolderLookupResult holder_i =
-            function_template_info.LookupHolderOfExpectedType(receiver_map);
+            function_template_info.LookupHolderOfExpectedType(receiver_map,
+                                                              false);
 
         if (api_holder.lookup != holder_i.lookup) return inference.NoChange();
         if (!(api_holder.holder.has_value() && holder_i.holder.has_value()))
@@ -3318,6 +3226,13 @@ bool ShouldUseCallICFeedback(Node* node) {
   return true;
 }
 
+base::Optional<HeapObjectRef> GetHeapObjectFeedback(
+    JSHeapBroker* broker, const FeedbackNexus& nexus) {
+  HeapObject object;
+  if (!nexus.GetFeedback()->GetHeapObject(&object)) return base::nullopt;
+  return HeapObjectRef(broker, handle(object, broker->isolate()));
+}
+
 }  // namespace
 
 Reduction JSCallReducer::ReduceJSCall(Node* node) {
@@ -3436,18 +3351,19 @@ Reduction JSCallReducer::ReduceJSCall(Node* node) {
     return reduction.Changed() ? reduction : Changed(node);
   }
 
+  // Extract feedback from the {node} using the FeedbackNexus.
   if (!p.feedback().IsValid()) return NoChange();
-  ProcessedFeedback const* feedback =
-      broker()->GetFeedbackForCall(FeedbackSource(p.feedback()));
-  if (feedback->IsInsufficient()) {
+  FeedbackNexus nexus(p.feedback().vector(), p.feedback().slot());
+  if (nexus.IsUninitialized()) {
     return ReduceSoftDeoptimize(
         node, DeoptimizeReason::kInsufficientTypeFeedbackForCall);
   }
 
-  base::Optional<HeapObjectRef> feedback_target = feedback->AsCall()->target();
-  if (feedback_target.has_value() && ShouldUseCallICFeedback(target) &&
-      feedback_target->map().is_callable()) {
-    Node* target_function = jsgraph()->Constant(*feedback_target);
+  base::Optional<HeapObjectRef> feedback =
+      GetHeapObjectFeedback(broker(), nexus);
+  if (feedback.has_value() && ShouldUseCallICFeedback(target) &&
+      feedback->map().is_callable()) {
+    Node* target_function = jsgraph()->Constant(*feedback);
 
     // Check that the {target} is still the {target_function}.
     Node* check = graph()->NewNode(simplified()->ReferenceEqual(), target,
@@ -3667,8 +3583,6 @@ Reduction JSCallReducer::ReduceJSCall(Node* node,
       return ReduceMathUnary(node, simplified()->NumberFloor());
     case Builtins::kMathFround:
       return ReduceMathUnary(node, simplified()->NumberFround());
-    case Builtins::kMathHypot:
-      return ReduceMathHypot(node);
     case Builtins::kMathLog:
       return ReduceMathUnary(node, simplified()->NumberLog());
     case Builtins::kMathLog1p:
@@ -3852,10 +3766,6 @@ Reduction JSCallReducer::ReduceJSCallWithSpread(Node* node) {
 }
 
 Reduction JSCallReducer::ReduceJSConstruct(Node* node) {
-  // TODO(mslekova): Remove once ReduceJSConstruct is brokerized.
-  AllowHandleDereference allow_handle_dereference;
-  AllowHandleAllocation allow_handle_allocation;
-
   DCHECK_EQ(IrOpcode::kJSConstruct, node->opcode());
   ConstructParameters const& p = ConstructParametersOf(node->op());
   DCHECK_LE(2u, p.arity());
@@ -3865,17 +3775,17 @@ Reduction JSCallReducer::ReduceJSConstruct(Node* node) {
   Node* effect = NodeProperties::GetEffectInput(node);
   Node* control = NodeProperties::GetControlInput(node);
 
+  // Extract feedback from the {node} using the FeedbackNexus.
   if (p.feedback().IsValid()) {
-    ProcessedFeedback const* feedback =
-        broker()->GetFeedbackForCall(FeedbackSource(p.feedback()));
-    if (feedback->IsInsufficient()) {
+    FeedbackNexus nexus(p.feedback().vector(), p.feedback().slot());
+    if (nexus.IsUninitialized()) {
       return ReduceSoftDeoptimize(
           node, DeoptimizeReason::kInsufficientTypeFeedbackForConstruct);
     }
 
-    base::Optional<HeapObjectRef> feedback_target =
-        feedback->AsCall()->target();
-    if (feedback_target.has_value() && feedback_target->IsAllocationSite()) {
+    base::Optional<HeapObjectRef> feedback =
+        GetHeapObjectFeedback(broker(), nexus);
+    if (feedback.has_value() && feedback->IsAllocationSite()) {
       // The feedback is an AllocationSite, which means we have called the
       // Array function and collected transition (and pretenuring) feedback
       // for the resulting arrays.  This has to be kept in sync with the
@@ -3900,12 +3810,12 @@ Reduction JSCallReducer::ReduceJSConstruct(Node* node) {
       NodeProperties::ReplaceValueInput(node, array_function, 1);
       NodeProperties::ChangeOp(
           node, javascript()->CreateArray(
-                    arity, feedback_target->AsAllocationSite().object()));
+                    arity, feedback->AsAllocationSite().object()));
       return Changed(node);
-    } else if (feedback_target.has_value() &&
+    } else if (feedback.has_value() &&
                !HeapObjectMatcher(new_target).HasValue() &&
-               feedback_target->map().is_constructor()) {
-      Node* new_target_feedback = jsgraph()->Constant(*feedback_target);
+               feedback->map().is_constructor()) {
+      Node* new_target_feedback = jsgraph()->Constant(*feedback);
 
       // Check that the {new_target} is still the {new_target_feedback}.
       Node* check = graph()->NewNode(simplified()->ReferenceEqual(), new_target,
@@ -6170,7 +6080,7 @@ Reduction JSCallReducer::ReducePromisePrototypeFinally(Node* node) {
 }
 
 Reduction JSCallReducer::ReducePromisePrototypeThen(Node* node) {
-  DisallowHeapAccessIf no_heap_access(FLAG_concurrent_inlining);
+  DisallowHeapAccessIf no_heap_acess(FLAG_concurrent_inlining);
 
   DCHECK_EQ(IrOpcode::kJSCall, node->opcode());
   CallParameters const& p = CallParametersOf(node->op());
@@ -6238,7 +6148,7 @@ Reduction JSCallReducer::ReducePromisePrototypeThen(Node* node) {
 
 // ES section #sec-promise.resolve
 Reduction JSCallReducer::ReducePromiseResolveTrampoline(Node* node) {
-  DisallowHeapAccessIf no_heap_access(FLAG_concurrent_inlining);
+  DisallowHeapAccessIf no_heap_acess(FLAG_concurrent_inlining);
 
   DCHECK_EQ(IrOpcode::kJSCall, node->opcode());
   Node* receiver = NodeProperties::GetValueInput(node, 1);

@@ -67,7 +67,7 @@ void run() {
   file.close();
   if (file.fail()) {
     std::cout << "> Error loading module!" << std::endl;
-    return;
+    exit(1);
   }
 
   // Compile.
@@ -75,7 +75,7 @@ void run() {
   auto module = wasm::Module::make(store, binary);
   if (!module) {
     std::cout << "> Error compiling module!" << std::endl;
-    return;
+    exit(1);
   }
 
   // Create external globals.
@@ -102,7 +102,7 @@ void run() {
   auto instance = wasm::Instance::make(store, module.get(), imports);
   if (!instance) {
     std::cout << "> Error instantiating module!" << std::endl;
-    return;
+    exit(1);
   }
 
   // Extract export.
@@ -125,6 +125,9 @@ void run() {
   auto set_var_i64_import = get_export_func(exports, i++);
   auto set_var_f32_export = get_export_func(exports, i++);
   auto set_var_i64_export = get_export_func(exports, i++);
+
+  // Try cloning.
+  assert(var_f32_import->copy()->same(var_f32_import.get()));
 
   // Interact.
   std::cout << "Accessing globals..." << std::endl;

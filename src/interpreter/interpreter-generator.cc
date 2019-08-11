@@ -2288,6 +2288,41 @@ IGNITION_HANDLER(JumpIfNotUndefinedConstant, InterpreterAssembler) {
   JumpIfWordNotEqual(accumulator, UndefinedConstant(), relative_jump);
 }
 
+// JumpIfUndefinedOrNull <imm>
+//
+// Jump by the number of bytes represented by an immediate operand if the object
+// referenced by the accumulator is the undefined constant or the null constant.
+IGNITION_HANDLER(JumpIfUndefinedOrNull, InterpreterAssembler) {
+  Node* accumulator = GetAccumulator();
+
+  Label do_jump(this);
+  GotoIf(IsUndefined(accumulator), &do_jump);
+  GotoIf(IsNull(accumulator), &do_jump);
+  Dispatch();
+
+  BIND(&do_jump);
+  Node* relative_jump = BytecodeOperandUImmWord(0);
+  Jump(relative_jump);
+}
+
+// JumpIfUndefinedOrNullConstant <idx>
+//
+// Jump by the number of bytes in the Smi in the |idx| entry in the constant
+// pool if the object referenced by the accumulator is the undefined constant or
+// the null constant.
+IGNITION_HANDLER(JumpIfUndefinedOrNullConstant, InterpreterAssembler) {
+  Node* accumulator = GetAccumulator();
+
+  Label do_jump(this);
+  GotoIf(IsUndefined(accumulator), &do_jump);
+  GotoIf(IsNull(accumulator), &do_jump);
+  Dispatch();
+
+  BIND(&do_jump);
+  Node* relative_jump = LoadAndUntagConstantPoolEntryAtOperandIndex(0);
+  Jump(relative_jump);
+}
+
 // JumpIfJSReceiver <imm>
 //
 // Jump by the number of bytes represented by an immediate operand if the object
@@ -3133,6 +3168,25 @@ IGNITION_HANDLER(ForInStep, InterpreterAssembler) {
   TNode<Smi> index = CAST(LoadRegisterAtOperandIndex(0));
   TNode<Smi> one = SmiConstant(1);
   TNode<Smi> result = SmiAdd(index, one);
+  SetAccumulator(result);
+  Dispatch();
+}
+
+// GetIterator <object>
+//
+// Retrieves the object[Symbol.iterator] method and stores the result
+// in the accumulator
+// TODO(swapnilgaikwad): Extend the functionality of the bytecode to call
+// iterator method for an object
+IGNITION_HANDLER(GetIterator, InterpreterAssembler) {
+  Node* receiver = LoadRegisterAtOperandIndex(0);
+  Node* context = GetContext();
+  Node* feedback_vector = LoadFeedbackVector();
+  Node* feedback_slot = BytecodeOperandIdx(1);
+  Node* smi_slot = SmiTag(feedback_slot);
+
+  Node* result = CallBuiltin(Builtins::kGetIteratorWithFeedback, context,
+                             receiver, smi_slot, feedback_vector);
   SetAccumulator(result);
   Dispatch();
 }

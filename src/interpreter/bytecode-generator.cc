@@ -915,6 +915,27 @@ class BytecodeGenerator::IteratorRecord final {
   Register next_;
 };
 
+class BytecodeGenerator::OptionalChainNullLabelScope final {
+ public:
+  explicit OptionalChainNullLabelScope(BytecodeGenerator* bytecode_generator)
+      : bytecode_generator_(bytecode_generator),
+        labels_(bytecode_generator->zone()) {
+    prev_ = bytecode_generator_->optional_chaining_null_labels_;
+    bytecode_generator_->optional_chaining_null_labels_ = &labels_;
+  }
+
+  ~OptionalChainNullLabelScope() {
+    bytecode_generator_->optional_chaining_null_labels_ = prev_;
+  }
+
+  BytecodeLabels* labels() { return &labels_; }
+
+ private:
+  BytecodeGenerator* bytecode_generator_;
+  BytecodeLabels labels_;
+  BytecodeLabels* prev_;
+};
+
 namespace {
 
 // A map from property names to getter/setter pairs allocated in the zone that
@@ -994,6 +1015,7 @@ BytecodeGenerator::BytecodeGenerator(
       execution_context_(nullptr),
       execution_result_(nullptr),
       incoming_new_target_or_generator_(),
+      optional_chaining_null_labels_(nullptr),
       dummy_feedback_slot_(feedback_spec(), FeedbackSlotKind::kCompareOp),
       generator_jump_table_(nullptr),
       suspend_count_(0),
@@ -1755,14 +1777,13 @@ void BytecodeGenerator::VisitForInStatement(ForInStatement* stmt) {
     return;
   }
 
-  BytecodeLabel subject_null_label, subject_undefined_label;
+  BytecodeLabel subject_undefined_label;
   FeedbackSlot slot = feedback_spec()->AddForInSlot();
 
   // Prepare the state for executing ForIn.
   builder()->SetExpressionAsStatementPosition(stmt->subject());
   VisitForAccumulatorValue(stmt->subject());
-  builder()->JumpIfUndefined(&subject_undefined_label);
-  builder()->JumpIfNull(&subject_null_label);
+  builder()->JumpIfUndefinedOrNull(&subject_undefined_label);
   Register receiver = register_allocator()->NewRegister();
   builder()->ToObject(receiver);
 
@@ -1804,7 +1825,6 @@ void BytecodeGenerator::VisitForInStatement(ForInStatement* stmt) {
     builder()->StoreAccumulatorInRegister(index);
     loop_builder.JumpToHeader(loop_depth_);
   }
-  builder()->Bind(&subject_null_label);
   builder()->Bind(&subject_undefined_label);
 }
 
@@ -2124,6 +2144,22 @@ void BytecodeGenerator::BuildClassLiteral(ClassLiteral* expr, Register name) {
         .CallRuntime(Runtime::kCreatePrivateNameSymbol, brand);
     BuildVariableAssignment(expr->scope()->brand(), Token::INIT,
                             HoleCheckMode::kElided);
+
+    // Store the home object for any private methods or accessors that need
+    // them. We do this here once the prototype and brand symbol has
+    // been created.
+    for (int i = 0; i < expr->properties()->length(); i++) {
+      RegisterAllocationScope register_scope(this);
+      ClassLiteral::Property* property = expr->properties()->at(i);
+      // TODO(joyee): do the same for private accessors when they are
+      // implemented.
+      if (property->NeedsHomeObjectOnClassPrototype()) {
+        Register func = register_allocator()->NewRegister();
+        BuildVariableLoad(property->private_name_var(), HoleCheckMode::kElided);
+        builder()->StoreAccumulatorInRegister(func);
+        VisitSetHomeObject(func, prototype, property);
+      }
+    }
   }
 
   if (expr->instance_members_initializer_function() != nullptr) {
@@ -3319,8 +3355,7 @@ void BytecodeGenerator::BuildFinalizeIteration(
                           ast_string_constants()->return_string(),
                           feedback_index(feedback_spec()->AddLoadICSlot()))
       .StoreAccumulatorInRegister(method)
-      .JumpIfUndefined(iterator_is_done.New())
-      .JumpIfNull(iterator_is_done.New());
+      .JumpIfUndefinedOrNull(iterator_is_done.New());
 
   {
     RegisterAllocationScope register_scope(this);
@@ -4302,7 +4337,14 @@ void BytecodeGenerator::VisitThrow(Throw* expr) {
 }
 
 void BytecodeGenerator::VisitPropertyLoad(Register obj, Property* property) {
+  if (property->is_optional_chain_link()) {
+    DCHECK_NOT_NULL(optional_chaining_null_labels_);
+    builder()->LoadAccumulatorWithRegister(obj).JumpIfUndefinedOrNull(
+        optional_chaining_null_labels_->New());
+  }
+
   AssignType property_kind = Property::GetAssignType(property);
+
   switch (property_kind) {
     case NON_PROPERTY:
       UNREACHABLE();
@@ -4398,6 +4440,16 @@ void BytecodeGenerator::VisitKeyedSuperPropertyLoad(Property* property,
   if (opt_receiver_out.is_valid()) {
     builder()->MoveRegister(args[0], opt_receiver_out);
   }
+}
+
+void BytecodeGenerator::VisitOptionalChain(OptionalChain* expr) {
+  BytecodeLabel done;
+  OptionalChainNullLabelScope label_scope(this);
+  VisitForAccumulatorValue(expr->expression());
+  builder()->Jump(&done);
+  label_scope.labels()->Bind(builder());
+  builder()->LoadUndefined();
+  builder()->Bind(&done);
 }
 
 void BytecodeGenerator::VisitProperty(Property* expr) {
@@ -4531,6 +4583,12 @@ void BytecodeGenerator::VisitCall(Call* expr) {
     }
     case Call::SUPER_CALL:
       UNREACHABLE();
+  }
+
+  if (expr->is_optional_chain_link()) {
+    DCHECK_NOT_NULL(optional_chaining_null_labels_);
+    builder()->LoadAccumulatorWithRegister(callee).JumpIfUndefinedOrNull(
+        optional_chaining_null_labels_->New());
   }
 
   // Evaluate all arguments to the function call and store in sequential args
@@ -4794,6 +4852,26 @@ void BytecodeGenerator::VisitDelete(UnaryOperation* unary) {
     Register object = VisitForRegisterValue(property->obj());
     VisitForAccumulatorValue(property->key());
     builder()->Delete(object, language_mode());
+  } else if (expr->IsOptionalChain()) {
+    Expression* expr_inner = expr->AsOptionalChain()->expression();
+    if (expr_inner->IsProperty()) {
+      Property* property = expr_inner->AsProperty();
+      DCHECK(!property->IsPrivateReference());
+      BytecodeLabel done;
+      OptionalChainNullLabelScope label_scope(this);
+      VisitForAccumulatorValue(property->obj());
+      builder()->JumpIfUndefinedOrNull(label_scope.labels()->New());
+      Register object = register_allocator()->NewRegister();
+      builder()->StoreAccumulatorInRegister(object);
+      VisitForAccumulatorValue(property->key());
+      builder()->Delete(object, language_mode()).Jump(&done);
+      label_scope.labels()->Bind(builder());
+      builder()->LoadTrue();
+      builder()->Bind(&done);
+    } else {
+      VisitForEffect(expr);
+      builder()->LoadTrue();
+    }
   } else if (expr->IsVariableProxy() &&
              !expr->AsVariableProxy()->is_new_target()) {
     // Delete of an unqualified identifier is allowed in sloppy mode but is
@@ -5173,10 +5251,8 @@ void BytecodeGenerator::BuildGetIterator(IteratorType hint) {
     builder()->StoreAccumulatorInRegister(obj).LoadAsyncIteratorProperty(
         obj, feedback_index(feedback_spec()->AddLoadICSlot()));
 
-    BytecodeLabel async_iterator_undefined, async_iterator_null, done;
-    // TODO(ignition): Add a single opcode for JumpIfNullOrUndefined
-    builder()->JumpIfUndefined(&async_iterator_undefined);
-    builder()->JumpIfNull(&async_iterator_null);
+    BytecodeLabel async_iterator_undefined, done;
+    builder()->JumpIfUndefinedOrNull(&async_iterator_undefined);
 
     // Let iterator be Call(method, obj)
     builder()->StoreAccumulatorInRegister(method).CallProperty(
@@ -5187,12 +5263,10 @@ void BytecodeGenerator::BuildGetIterator(IteratorType hint) {
     builder()->CallRuntime(Runtime::kThrowSymbolAsyncIteratorInvalid);
 
     builder()->Bind(&async_iterator_undefined);
-    builder()->Bind(&async_iterator_null);
     // If method is undefined,
     //     Let syncMethod be GetMethod(obj, @@iterator)
     builder()
-        ->LoadIteratorProperty(obj,
-                               feedback_index(feedback_spec()->AddLoadICSlot()))
+        ->GetIterator(obj, feedback_index(feedback_spec()->AddLoadICSlot()))
         .StoreAccumulatorInRegister(method);
 
     //     Let syncIterator be Call(syncMethod, obj)
@@ -5210,8 +5284,7 @@ void BytecodeGenerator::BuildGetIterator(IteratorType hint) {
     // Let method be GetMethod(obj, @@iterator).
     builder()
         ->StoreAccumulatorInRegister(obj)
-        .LoadIteratorProperty(obj,
-                              feedback_index(feedback_spec()->AddLoadICSlot()))
+        .GetIterator(obj, feedback_index(feedback_spec()->AddLoadICSlot()))
         .StoreAccumulatorInRegister(method);
 
     // Let iterator be Call(method, obj).
@@ -5277,8 +5350,7 @@ void BytecodeGenerator::BuildCallIteratorMethod(Register iterator,
   FeedbackSlot slot = feedback_spec()->AddLoadICSlot();
   builder()
       ->LoadNamedProperty(iterator, method_name, feedback_index(slot))
-      .JumpIfUndefined(if_notcalled->New())
-      .JumpIfNull(if_notcalled->New())
+      .JumpIfUndefinedOrNull(if_notcalled->New())
       .StoreAccumulatorInRegister(method)
       .CallProperty(method, receiver_and_args,
                     feedback_index(feedback_spec()->AddCallICSlot()))

@@ -92,6 +92,7 @@ bool Scanner::BookmarkScope::HasBeenApplied() const {
 Scanner::Scanner(Utf16CharacterStream* source, bool is_module)
     : source_(source),
       found_html_comment_(false),
+      allow_harmony_optional_chaining_(false),
       is_module_(is_module),
       octal_pos_(Location::invalid()),
       octal_message_(MessageTemplate::kNone) {
@@ -633,6 +634,11 @@ bool Scanner::ScanDecimalDigits(bool allow_numeric_separator) {
   }
   while (IsDecimalDigit(c0_)) {
     AddLiteralCharAdvance();
+  }
+  if (c0_ == '_') {
+    ReportScannerError(Location(source_pos(), source_pos() + 1),
+                       MessageTemplate::kInvalidOrUnexpectedToken);
+    return false;
   }
   return true;
 }

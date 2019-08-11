@@ -1222,8 +1222,8 @@ Handle<JSGlobalObject> Genesis::CreateNewGlobals(
         FunctionTemplateInfo::cast(js_global_object_template->constructor()),
         isolate());
     js_global_object_function = ApiNatives::CreateApiFunction(
-        isolate(), js_global_object_constructor, factory()->the_hole_value(),
-        JS_GLOBAL_OBJECT_TYPE);
+        isolate(), isolate()->native_context(), js_global_object_constructor,
+        factory()->the_hole_value(), JS_GLOBAL_OBJECT_TYPE);
   }
 
   js_global_object_function->initial_map().set_is_prototype_map(true);
@@ -1248,8 +1248,8 @@ Handle<JSGlobalObject> Genesis::CreateNewGlobals(
     Handle<FunctionTemplateInfo> global_constructor(
         FunctionTemplateInfo::cast(data->constructor()), isolate());
     global_proxy_function = ApiNatives::CreateApiFunction(
-        isolate(), global_constructor, factory()->the_hole_value(),
-        JS_GLOBAL_PROXY_TYPE);
+        isolate(), isolate()->native_context(), global_constructor,
+        factory()->the_hole_value(), JS_GLOBAL_PROXY_TYPE);
   }
   global_proxy_function->initial_map().set_is_access_check_needed(true);
   global_proxy_function->initial_map().set_may_have_interesting_symbols(true);
@@ -4260,6 +4260,7 @@ EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_private_methods)
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_dynamic_import)
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_import_meta)
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_regexp_sequence)
+EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_optional_chaining)
 
 #ifdef V8_INTL_SUPPORT
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_intl_add_calendar_numbering_system)

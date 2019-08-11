@@ -4762,8 +4762,8 @@ class V8_EXPORT ArrayBuffer : public Object {
   bool IsDetachable() const;
 
   // TODO(913887): fix the use of 'neuter' in the API.
-  V8_DEPRECATE_SOON("Use IsDetachable() instead.",
-                    inline bool IsNeuterable() const) {
+  V8_DEPRECATED("Use IsDetachable() instead.",
+                inline bool IsNeuterable() const) {
     return IsDetachable();
   }
 
@@ -4776,7 +4776,7 @@ class V8_EXPORT ArrayBuffer : public Object {
   void Detach();
 
   // TODO(913887): fix the use of 'neuter' in the API.
-  V8_DEPRECATE_SOON("Use Detach() instead.", inline void Neuter()) { Detach(); }
+  V8_DEPRECATED("Use Detach() instead.", inline void Neuter()) { Detach(); }
 
   /**
    * Make this ArrayBuffer external. The pointer to underlying memory block
@@ -4786,7 +4786,7 @@ class V8_EXPORT ArrayBuffer : public Object {
    *
    * The Data pointer of ArrayBuffer::Contents must be freed using the provided
    * deleter, which will call ArrayBuffer::Allocator::Free if the buffer
-   * was allocated with ArrayBuffer::Allocator::Allocate.
+   * was allocated with ArraryBuffer::Allocator::Allocate.
    */
   Contents Externalize();
 
@@ -4808,7 +4808,6 @@ class V8_EXPORT ArrayBuffer : public Object {
  private:
   ArrayBuffer();
   static void CheckCast(Value* obj);
-  Contents GetContents(bool externalize);
 };
 
 
@@ -5226,7 +5225,6 @@ class V8_EXPORT SharedArrayBuffer : public Object {
  private:
   SharedArrayBuffer();
   static void CheckCast(Value* obj);
-  Contents GetContents(bool externalize);
 };
 
 

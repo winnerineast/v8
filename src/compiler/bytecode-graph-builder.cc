@@ -245,12 +245,11 @@ class BytecodeGraphBuilder {
   ForInMode GetForInMode(int operand_index);
 
   // Helper function to compute call frequency from the recorded type
-  // feedback. Returns unknown if invocation count is unknown. Returns 0 if
-  // feedback is insufficient.
+  // feedback.
   CallFrequency ComputeCallFrequency(int slot_id) const;
 
   // Helper function to extract the speculation mode from the recorded type
-  // feedback. Returns kDisallowSpeculation if feedback is insufficient.
+  // feedback.
   SpeculationMode GetSpeculationMode(int slot_id) const;
 
   // Control flow plumbing.
@@ -951,7 +950,7 @@ BytecodeGraphBuilder::BytecodeGraphBuilder(
       bytecode_array_(bytecode_array),
       feedback_vector_(feedback_vector),
       type_hint_lowering_(
-          broker, jsgraph, feedback_vector,
+          jsgraph, feedback_vector.object(),
           (flags & BytecodeGraphBuilderFlag::kBailoutOnUninitialized)
               ? JSTypeHintLowering::kBailoutOnUninitialized
               : JSTypeHintLowering::kNoFlags),
@@ -964,8 +963,7 @@ BytecodeGraphBuilder::BytecodeGraphBuilder(
       bytecode_analysis_(broker_->GetBytecodeAnalysis(
           bytecode_array.object(), osr_offset,
           flags & BytecodeGraphBuilderFlag::kAnalyzeEnvironmentLiveness,
-          FLAG_concurrent_inlining ? SerializationPolicy::kAssumeSerialized
-                                   : SerializationPolicy::kSerializeIfNeeded)),
+          !FLAG_concurrent_inlining)),
       environment_(nullptr),
       osr_(!osr_offset.IsNone()),
       currently_peeled_loop_offset_(-1),
@@ -1018,7 +1016,6 @@ Node* BytecodeGraphBuilder::BuildLoadNativeContextField(int index) {
 
 VectorSlotPair BytecodeGraphBuilder::CreateVectorSlotPair(int slot_id) {
   FeedbackSlot slot = FeedbackVector::ToSlot(slot_id);
-  // TODO(mvstanton): eliminate this use of a FeedbackNexus.
   FeedbackNexus nexus(feedback_vector().object(), slot);
   return VectorSlotPair(feedback_vector().object(), slot, nexus.ic_state());
 }
@@ -1932,52 +1929,56 @@ void BytecodeGraphBuilder::VisitCreateClosure() {
 }
 
 void BytecodeGraphBuilder::VisitCreateBlockContext() {
-  Handle<ScopeInfo> scope_info = Handle<ScopeInfo>::cast(
-      bytecode_iterator().GetConstantForIndexOperand(0, isolate()));
-
-  const Operator* op = javascript()->CreateBlockContext(scope_info);
+  DisallowHeapAccessIf no_heap_access(FLAG_concurrent_inlining);
+  ScopeInfoRef scope_info(
+      broker(), bytecode_iterator().GetConstantForIndexOperand(0, isolate()));
+  const Operator* op = javascript()->CreateBlockContext(scope_info.object());
   Node* context = NewNode(op);
   environment()->BindAccumulator(context);
 }
 
 void BytecodeGraphBuilder::VisitCreateFunctionContext() {
-  Handle<ScopeInfo> scope_info = Handle<ScopeInfo>::cast(
-      bytecode_iterator().GetConstantForIndexOperand(0, isolate()));
+  DisallowHeapAccessIf no_heap_access(FLAG_concurrent_inlining);
+  ScopeInfoRef scope_info(
+      broker(), bytecode_iterator().GetConstantForIndexOperand(0, isolate()));
   uint32_t slots = bytecode_iterator().GetUnsignedImmediateOperand(1);
-  const Operator* op =
-      javascript()->CreateFunctionContext(scope_info, slots, FUNCTION_SCOPE);
+  const Operator* op = javascript()->CreateFunctionContext(
+      scope_info.object(), slots, FUNCTION_SCOPE);
   Node* context = NewNode(op);
   environment()->BindAccumulator(context);
 }
 
 void BytecodeGraphBuilder::VisitCreateEvalContext() {
-  Handle<ScopeInfo> scope_info = Handle<ScopeInfo>::cast(
-      bytecode_iterator().GetConstantForIndexOperand(0, isolate()));
+  DisallowHeapAccessIf no_heap_access(FLAG_concurrent_inlining);
+  ScopeInfoRef scope_info(
+      broker(), bytecode_iterator().GetConstantForIndexOperand(0, isolate()));
   uint32_t slots = bytecode_iterator().GetUnsignedImmediateOperand(1);
-  const Operator* op =
-      javascript()->CreateFunctionContext(scope_info, slots, EVAL_SCOPE);
+  const Operator* op = javascript()->CreateFunctionContext(scope_info.object(),
+                                                           slots, EVAL_SCOPE);
   Node* context = NewNode(op);
   environment()->BindAccumulator(context);
 }
 
 void BytecodeGraphBuilder::VisitCreateCatchContext() {
+  DisallowHeapAccessIf no_heap_access(FLAG_concurrent_inlining);
   interpreter::Register reg = bytecode_iterator().GetRegisterOperand(0);
   Node* exception = environment()->LookupRegister(reg);
-  Handle<ScopeInfo> scope_info = Handle<ScopeInfo>::cast(
-      bytecode_iterator().GetConstantForIndexOperand(1, isolate()));
+  ScopeInfoRef scope_info(
+      broker(), bytecode_iterator().GetConstantForIndexOperand(1, isolate()));
 
-  const Operator* op = javascript()->CreateCatchContext(scope_info);
+  const Operator* op = javascript()->CreateCatchContext(scope_info.object());
   Node* context = NewNode(op, exception);
   environment()->BindAccumulator(context);
 }
 
 void BytecodeGraphBuilder::VisitCreateWithContext() {
+  DisallowHeapAccessIf no_heap_access(FLAG_concurrent_inlining);
   Node* object =
       environment()->LookupRegister(bytecode_iterator().GetRegisterOperand(0));
-  Handle<ScopeInfo> scope_info = Handle<ScopeInfo>::cast(
-      bytecode_iterator().GetConstantForIndexOperand(1, isolate()));
+  ScopeInfoRef scope_info(
+      broker(), bytecode_iterator().GetConstantForIndexOperand(1, isolate()));
 
-  const Operator* op = javascript()->CreateWithContext(scope_info);
+  const Operator* op = javascript()->CreateWithContext(scope_info.object());
   Node* context = NewNode(op, object);
   environment()->BindAccumulator(context);
 }
@@ -2144,11 +2145,11 @@ void BytecodeGraphBuilder::BuildCall(ConvertReceiverMode receiver_mode,
   PrepareEagerCheckpoint();
 
   VectorSlotPair feedback = CreateVectorSlotPair(slot_id);
-  CallFrequency frequency = ComputeCallFrequency(slot_id);
-  SpeculationMode speculation_mode = GetSpeculationMode(slot_id);
-  const Operator* op = javascript()->Call(arg_count, frequency, feedback,
-                                          receiver_mode, speculation_mode);
 
+  CallFrequency frequency = ComputeCallFrequency(slot_id);
+  const Operator* op =
+      javascript()->Call(arg_count, frequency, feedback, receiver_mode,
+                         GetSpeculationMode(slot_id));
   JSTypeHintLowering::LoweringResult lowering = TryBuildSimplifiedCall(
       op, args, static_cast<int>(arg_count), feedback.slot());
   if (lowering.IsExit()) return;
@@ -2329,6 +2330,7 @@ void BytecodeGraphBuilder::VisitCallWithSpread() {
                                                     first_arg, arg_count);
   int const slot_id = bytecode_iterator().GetIndexOperand(3);
   VectorSlotPair feedback = CreateVectorSlotPair(slot_id);
+
   CallFrequency frequency = ComputeCallFrequency(slot_id);
   const Operator* op = javascript()->CallWithSpread(
       static_cast<int>(reg_count + 1), frequency, feedback);
@@ -2642,23 +2644,23 @@ void BytecodeGraphBuilder::BuildBinaryOp(const Operator* op) {
 BinaryOperationHint BytecodeGraphBuilder::GetBinaryOperationHint(
     int operand_index) {
   FeedbackSlot slot = bytecode_iterator().GetSlotOperand(operand_index);
-  FeedbackSource source(feedback_vector(), slot);
-  return broker()->GetFeedbackForBinaryOperation(source);
+  FeedbackNexus nexus(feedback_vector().object(), slot);
+  return nexus.GetBinaryOperationFeedback();
 }
 
 // Helper function to create compare operation hint from the recorded type
 // feedback.
 CompareOperationHint BytecodeGraphBuilder::GetCompareOperationHint() {
   FeedbackSlot slot = bytecode_iterator().GetSlotOperand(1);
-  FeedbackSource source(feedback_vector(), slot);
-  return broker()->GetFeedbackForCompareOperation(source);
+  FeedbackNexus nexus(feedback_vector().object(), slot);
+  return nexus.GetCompareOperationFeedback();
 }
 
 // Helper function to create for-in mode from the recorded type feedback.
 ForInMode BytecodeGraphBuilder::GetForInMode(int operand_index) {
   FeedbackSlot slot = bytecode_iterator().GetSlotOperand(operand_index);
-  FeedbackSource source(feedback_vector(), slot);
-  switch (broker()->GetFeedbackForForIn(source)) {
+  FeedbackNexus nexus(feedback_vector().object(), slot);
+  switch (nexus.GetForInFeedback()) {
     case ForInHint::kNone:
     case ForInHint::kEnumCacheKeysAndIndices:
       return ForInMode::kUseEnumCacheKeysAndIndices;
@@ -2672,13 +2674,11 @@ ForInMode BytecodeGraphBuilder::GetForInMode(int operand_index) {
 
 CallFrequency BytecodeGraphBuilder::ComputeCallFrequency(int slot_id) const {
   if (invocation_frequency_.IsUnknown()) return CallFrequency();
-  FeedbackSlot slot = FeedbackVector::ToSlot(slot_id);
-  FeedbackSource source(feedback_vector(), slot);
-  ProcessedFeedback const* feedback = broker()->GetFeedbackForCall(source);
-  CHECK_NOT_NULL(feedback);
-  float feedback_frequency =
-      feedback->IsInsufficient() ? 0.0f : feedback->AsCall()->frequency();
-  if (feedback_frequency == 0.0f) {  // Prevent multiplying zero and infinity.
+  FeedbackNexus nexus(feedback_vector().object(),
+                      FeedbackVector::ToSlot(slot_id));
+  float feedback_frequency = nexus.ComputeCallFrequency();
+  if (feedback_frequency == 0.0f) {
+    // This is to prevent multiplying zero and infinity.
     return CallFrequency(0.0f);
   } else {
     return CallFrequency(feedback_frequency * invocation_frequency_.value());
@@ -2686,12 +2686,9 @@ CallFrequency BytecodeGraphBuilder::ComputeCallFrequency(int slot_id) const {
 }
 
 SpeculationMode BytecodeGraphBuilder::GetSpeculationMode(int slot_id) const {
-  FeedbackSlot slot = FeedbackVector::ToSlot(slot_id);
-  FeedbackSource source(feedback_vector(), slot);
-  ProcessedFeedback const* feedback = broker()->GetFeedbackForCall(source);
-  CHECK_NOT_NULL(feedback);
-  return feedback->IsInsufficient() ? SpeculationMode::kDisallowSpeculation
-                                    : feedback->AsCall()->speculation_mode();
+  FeedbackNexus nexus(feedback_vector().object(),
+                      FeedbackVector::ToSlot(slot_id));
+  return nexus.GetSpeculationMode();
 }
 
 void BytecodeGraphBuilder::VisitBitwiseNot() {
@@ -3139,6 +3136,16 @@ void BytecodeGraphBuilder::VisitJumpIfNotUndefinedConstant() {
   BuildJumpIfNotEqual(jsgraph()->UndefinedConstant());
 }
 
+void BytecodeGraphBuilder::VisitJumpIfUndefinedOrNull() {
+  BuildJumpIfEqual(jsgraph()->UndefinedConstant());
+  BuildJumpIfEqual(jsgraph()->NullConstant());
+}
+
+void BytecodeGraphBuilder::VisitJumpIfUndefinedOrNullConstant() {
+  BuildJumpIfEqual(jsgraph()->UndefinedConstant());
+  BuildJumpIfEqual(jsgraph()->NullConstant());
+}
+
 void BytecodeGraphBuilder::VisitJumpLoop() { BuildJump(); }
 
 void BytecodeGraphBuilder::BuildSwitchOnSmi(Node* condition) {
@@ -3282,6 +3289,17 @@ void BytecodeGraphBuilder::VisitForInStep() {
                       NumberOperationHint::kSignedSmall),
                   index, jsgraph()->OneConstant());
   environment()->BindAccumulator(index, Environment::kAttachFrameState);
+}
+
+void BytecodeGraphBuilder::VisitGetIterator() {
+  PrepareEagerCheckpoint();
+  Node* object =
+      environment()->LookupRegister(bytecode_iterator().GetRegisterOperand(0));
+  VectorSlotPair feedback =
+      CreateVectorSlotPair(bytecode_iterator().GetIndexOperand(1));
+  const Operator* op = javascript()->GetIterator(feedback);
+  Node* node = NewNode(op, object);
+  environment()->BindAccumulator(node, Environment::kAttachFrameState);
 }
 
 void BytecodeGraphBuilder::VisitSuspendGenerator() {

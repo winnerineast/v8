@@ -91,7 +91,7 @@ declare_args() {
   # Enable embedded builtins.
   v8_enable_embedded_builtins = true
 
-  # Enable the registration of unwinding info for Windows x64 and ARM64.
+  # Enable the registration of unwinding info for Windows x64 and ARM64.
   v8_win64_unwinding_info = true
 
   # Enable code comments for builtins in the snapshot (impacts performance).
@@ -107,7 +107,7 @@ declare_args() {
   v8_enable_verify_csa = false
 
   # Enable pointer compression (sets -dV8_COMPRESS_POINTERS).
-  v8_enable_pointer_compression = ""
+  v8_enable_pointer_compression = false
   v8_enable_31bit_smis_on_64bit_arch = false
 
   # Sets -dOBJECT_PRINT.
@@ -198,6 +198,10 @@ declare_args() {
   # Redirect allocation in young generation so that there will be
   # only one single generation.
   v8_enable_single_generation = ""
+
+  # Use token threaded dispatch for the regular expression interpreter.
+  # Use switch-based dispatch if this is false
+  v8_enable_regexp_interpreter_threaded_dispatch = true
 }
 
 # Derived defaults.
@@ -225,10 +229,6 @@ if (v8_check_microtasks_scopes_consistency == "") {
 }
 if (v8_enable_snapshot_native_code_counters == "") {
   v8_enable_snapshot_native_code_counters = v8_enable_debugging_features
-}
-if (v8_enable_pointer_compression == "") {
-  # TODO(v8:v7703): temporarily enable pointer compression on arm64
-  v8_enable_pointer_compression = v8_current_cpu == "arm64"
 }
 if (v8_enable_shared_ro_heap == "") {
   v8_enable_shared_ro_heap = !v8_enable_pointer_compression && v8_use_snapshot
@@ -472,6 +472,9 @@ config("features") {
   }
   if (v8_win64_unwinding_info) {
     defines += [ "V8_WIN64_UNWINDING_INFO" ]
+  }
+  if (v8_enable_regexp_interpreter_threaded_dispatch) {
+    defines += [ "V8_ENABLE_REGEXP_INTERPRETER_THREADED_DISPATCH" ]
   }
 }
 
@@ -2057,7 +2060,6 @@ v8_source_set("v8_base_without_compiler") {
     "src/builtins/builtins-internal.cc",
     "src/builtins/builtins-intl.cc",
     "src/builtins/builtins-json.cc",
-    "src/builtins/builtins-math.cc",
     "src/builtins/builtins-number.cc",
     "src/builtins/builtins-object.cc",
     "src/builtins/builtins-promise.cc",
@@ -2451,8 +2453,6 @@ v8_source_set("v8_base_without_compiler") {
     "src/objects/api-callbacks.h",
     "src/objects/arguments-inl.h",
     "src/objects/arguments.h",
-    "src/objects/backing-store.cc",
-    "src/objects/backing-store.h",
     "src/objects/bigint.cc",
     "src/objects/bigint.h",
     "src/objects/cell-inl.h",
@@ -2945,6 +2945,8 @@ v8_source_set("v8_base_without_compiler") {
     "src/wasm/wasm-js.h",
     "src/wasm/wasm-limits.h",
     "src/wasm/wasm-linkage.h",
+    "src/wasm/wasm-memory.cc",
+    "src/wasm/wasm-memory.h",
     "src/wasm/wasm-module-builder.cc",
     "src/wasm/wasm-module-builder.h",
     "src/wasm/wasm-module.cc",

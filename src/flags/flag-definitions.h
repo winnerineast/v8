@@ -206,7 +206,8 @@ DEFINE_IMPLICATION(harmony_import_meta, harmony_dynamic_import)
 #define HARMONY_INPROGRESS_BASE(V)                                        \
   V(harmony_private_methods, "harmony private methods in class literals") \
   V(harmony_regexp_sequence, "RegExp Unicode sequence properties")        \
-  V(harmony_weak_refs, "harmony weak references")
+  V(harmony_weak_refs, "harmony weak references")                         \
+  V(harmony_optional_chaining, "harmony optional chaining syntax")
 
 #ifdef V8_INTL_SUPPORT
 #define HARMONY_INPROGRESS(V)                              \
@@ -708,13 +709,11 @@ DEFINE_STRING(dump_wasm_module_path, nullptr,
 // for configurability.
 #include "src/wasm/wasm-feature-flags.h"
 
-#define SPACE
 #define DECL_WASM_FLAG(feat, desc, val)      \
   DEFINE_BOOL(experimental_wasm_##feat, val, \
               "enable prototype " desc " for wasm")
-FOREACH_WASM_FEATURE_FLAG(DECL_WASM_FLAG, SPACE)
+FOREACH_WASM_FEATURE_FLAG(DECL_WASM_FLAG)
 #undef DECL_WASM_FLAG
-#undef SPACE
 
 DEFINE_BOOL(wasm_opt, false, "enable wasm optimization")
 DEFINE_BOOL(wasm_no_bounds_checks, false,
@@ -877,7 +876,6 @@ DEFINE_BOOL(trace_gc_object_stats, false,
 DEFINE_BOOL(trace_zone_stats, false, "trace zone memory usage")
 DEFINE_BOOL(track_retaining_path, false,
             "enable support for tracking retaining path")
-DEFINE_DEBUG_BOOL(trace_backing_store, false, "trace backing store events")
 DEFINE_BOOL(concurrent_array_buffer_freeing, true,
             "free array buffer allocations on a background thread")
 DEFINE_INT(gc_stats, 0, "Used by tracing internally to enable gc statistics")

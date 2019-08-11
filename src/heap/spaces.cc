@@ -13,7 +13,7 @@
 #include "src/base/platform/semaphore.h"
 #include "src/base/template-utils.h"
 #include "src/execution/vm-state-inl.h"
-#include "src/heap/array-buffer-tracker-inl.h"
+#include "src/heap/array-buffer-tracker.h"
 #include "src/heap/combined-heap.h"
 #include "src/heap/concurrent-marking.h"
 #include "src/heap/gc-tracer.h"
@@ -2083,7 +2083,7 @@ void PagedSpace::Verify(Isolate* isolate, ObjectVisitor* visitor) {
       } else if (object.IsJSArrayBuffer()) {
         JSArrayBuffer array_buffer = JSArrayBuffer::cast(object);
         if (ArrayBufferTracker::IsTracked(array_buffer)) {
-          size_t size = PerIsolateAccountingLength(array_buffer);
+          size_t size = array_buffer.byte_length();
           external_page_bytes[ExternalBackingStoreType::kArrayBuffer] += size;
         }
       }
@@ -2572,7 +2572,7 @@ void NewSpace::Verify(Isolate* isolate) {
       } else if (object.IsJSArrayBuffer()) {
         JSArrayBuffer array_buffer = JSArrayBuffer::cast(object);
         if (ArrayBufferTracker::IsTracked(array_buffer)) {
-          size_t size = PerIsolateAccountingLength(array_buffer);
+          size_t size = array_buffer.byte_length();
           external_space_bytes[ExternalBackingStoreType::kArrayBuffer] += size;
         }
       }
@@ -2972,7 +2972,7 @@ void FreeListCategory::Free(Address start, size_t size_in_bytes,
   set_top(free_space);
   available_ += size_in_bytes;
   length_++;
-  if ((mode == kLinkCategory) && (prev() == nullptr) && (next() == nullptr)) {
+  if ((mode == kLinkCategory) && !is_linked()) {
     owner()->AddCategory(this);
   }
 }
@@ -3313,7 +3313,7 @@ bool FreeList::AddCategory(FreeListCategory* category) {
   FreeListCategory* top = categories_[type];
 
   if (category->is_empty()) return false;
-  if (top == category) return false;
+  DCHECK_NE(top, category);
 
   // Common double-linked list insertion.
   if (top != nullptr) {
@@ -3520,9 +3520,44 @@ bool PagedSpace::RawSlowRefillLinearAllocationArea(int size_in_bytes) {
 // -----------------------------------------------------------------------------
 // MapSpace implementation
 
+// TODO(dmercadier): use a heap instead of sorting like that.
+// Using a heap will have multiple benefits:
+//   - for now, SortFreeList is only called after sweeping, which is somewhat
+//   late. Using a heap, sorting could be done online: FreeListCategories would
+//   be inserted in a heap (ie, in a sorted manner).
+//   - SortFreeList is a bit fragile: any change to FreeListMap (or to
+//   MapSpace::free_list_) could break it.
+void MapSpace::SortFreeList() {
+  using LiveBytesPagePair = std::pair<size_t, Page*>;
+  std::vector<LiveBytesPagePair> pages;
+  pages.reserve(CountTotalPages());
+
+  for (Page* p : *this) {
+    free_list()->RemoveCategory(p->free_list_category(kFirstCategory));
+    pages.push_back(std::make_pair(p->allocated_bytes(), p));
+  }
+
+  // Sorting by least-allocated-bytes first.
+  std::sort(pages.begin(), pages.end(),
+            [](const LiveBytesPagePair& a, const LiveBytesPagePair& b) {
+              return a.first < b.first;
+            });
+
+  for (LiveBytesPagePair const& p : pages) {
+    // Since AddCategory inserts in head position, it reverts the order produced
+    // by the sort above: least-allocated-bytes will be Added first, and will
+    // therefore be the last element (and the first one will be
+    // most-allocated-bytes).
+    free_list()->AddCategory(p.second->free_list_category(kFirstCategory));
+  }
+}
+
 #ifdef VERIFY_HEAP
 void MapSpace::VerifyObject(HeapObject object) { CHECK(object.IsMap()); }
 #endif
+
+// -----------------------------------------------------------------------------
+// ReadOnlySpace implementation
 
 ReadOnlySpace::ReadOnlySpace(Heap* heap)
     : PagedSpace(heap, RO_SPACE, NOT_EXECUTABLE, FreeList::CreateFreeList()),

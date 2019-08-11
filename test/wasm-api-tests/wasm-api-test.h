@@ -13,19 +13,6 @@
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/wasm-api/wasm.hh"
 
-namespace wasm {
-
-// TODO(jkummerow): Drop these from the API.
-#ifdef DEBUG
-template <class T>
-void vec<T>::make_data() {}
-
-template <class T>
-void vec<T>::free_data() {}
-#endif
-
-}  // namespace wasm
-
 namespace v8 {
 namespace internal {
 namespace wasm {
@@ -53,6 +40,7 @@ class WasmCapiTest : public ::testing::Test {
   WasmCapiTest()
       : Test(),
         zone_(&allocator_, ZONE_NAME),
+        wire_bytes_(&zone_),
         builder_(&zone_),
         exports_(vec<Extern*>::make()),
         wasm_i_i_sig_(1, 1, wasm_i_i_sig_types_) {
@@ -64,11 +52,11 @@ class WasmCapiTest : public ::testing::Test {
   }
 
   void Compile() {
-    ZoneBuffer buffer(&zone_);
-    builder_.WriteTo(&buffer);
-    size_t size = buffer.end() - buffer.begin();
+    builder_.WriteTo(&wire_bytes_);
+    size_t size = wire_bytes_.end() - wire_bytes_.begin();
     vec<byte_t> binary = vec<byte_t>::make(
-        size, reinterpret_cast<byte_t*>(const_cast<byte*>(buffer.begin())));
+        size,
+        reinterpret_cast<byte_t*>(const_cast<byte*>(wire_bytes_.begin())));
 
     module_ = Module::make(store_.get(), binary);
     DCHECK_NE(module_.get(), nullptr);
@@ -136,7 +124,9 @@ class WasmCapiTest : public ::testing::Test {
   Engine* engine() { return engine_.get(); }
   Store* store() { return store_.get(); }
   Module* module() { return module_.get(); }
+  Instance* instance() { return instance_.get(); }
   const vec<Extern*>& exports() { return exports_; }
+  ZoneBuffer* wire_bytes() { return &wire_bytes_; }
 
   FunctionSig* wasm_i_i_sig() { return &wasm_i_i_sig_; }
   FuncType* cpp_i_i_sig() { return cpp_i_i_sig_.get(); }
@@ -144,6 +134,7 @@ class WasmCapiTest : public ::testing::Test {
  private:
   AccountingAllocator allocator_;
   Zone zone_;
+  ZoneBuffer wire_bytes_;
   WasmModuleBuilder builder_;
   own<Engine*> engine_;
   own<Store*> store_;

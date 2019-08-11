@@ -17,6 +17,14 @@ auto fail_callback(
 }
 
 
+void print_frame(const wasm::Frame* frame) {
+  std::cout << "> " << frame->instance();
+  std::cout << " @ 0x" << std::hex << frame->module_offset();
+  std::cout << " = " << frame->func_index();
+  std::cout << ".0x" << std::hex << frame->func_offset() << std::endl;
+}
+
+
 void run() {
   // Initialize.
   std::cout << "Initializing..." << std::endl;
@@ -35,7 +43,7 @@ void run() {
   file.close();
   if (file.fail()) {
     std::cout << "> Error loading module!" << std::endl;
-    return;
+    exit(1);
   }
 
   // Compile.
@@ -43,7 +51,7 @@ void run() {
   auto module = wasm::Module::make(store, binary);
   if (!module) {
     std::cout << "> Error compiling module!" << std::endl;
-    return;
+    exit(1);
   }
 
   // Create external print functions.
@@ -61,7 +69,7 @@ void run() {
   auto instance = wasm::Instance::make(store, module.get(), imports);
   if (!instance) {
     std::cout << "> Error instantiating module!" << std::endl;
-    return;
+    exit(1);
   }
 
   // Extract export.
@@ -71,7 +79,7 @@ void run() {
       exports[0]->kind() != wasm::EXTERN_FUNC || !exports[0]->func() ||
       exports[1]->kind() != wasm::EXTERN_FUNC || !exports[1]->func()) {
     std::cout << "> Error accessing exports!" << std::endl;
-    return;
+    exit(1);
   }
 
   // Call.
@@ -80,11 +88,29 @@ void run() {
     auto trap = exports[i]->func()->call();
     if (!trap) {
       std::cout << "> Error calling function!" << std::endl;
-      return;
+      exit(1);
     }
 
     std::cout << "Printing message..." << std::endl;
     std::cout << "> " << trap->message().get() << std::endl;
+
+    std::cout << "Printing origin..." << std::endl;
+    auto frame = trap->origin();
+    if (frame) {
+      print_frame(frame.get());
+    } else {
+      std::cout << "> Empty origin." << std::endl;
+    }
+
+    std::cout << "Printing trace..." << std::endl;
+    auto trace = trap->trace();
+    if (trace.size() > 0) {
+      for (size_t i = 0; i < trace.size(); ++i) {
+        print_frame(trace[i].get());
+      }
+    } else {
+      std::cout << "> Empty trace." << std::endl;
+    }
   }
 
   // Shut down.

@@ -57,9 +57,9 @@ vars = {
 
 deps = {
   'v8/build':
-    Var('chromium_url') + '/chromium/src/build.git' + '@' + 'afb3374a0f4a730e2b6c468b8b63be4f797bfe17',
+    Var('chromium_url') + '/chromium/src/build.git' + '@' + 'f3d0ca5f46b7b190dbbdc6be508ca11dd5c54302',
   'v8/third_party/depot_tools':
-    Var('chromium_url') + '/chromium/tools/depot_tools.git' + '@' + '921f6a17514698ebc9b037f1f1e8696b6c359fdd',
+    Var('chromium_url') + '/chromium/tools/depot_tools.git' + '@' + '1b4c7e9f38442e4b43fd4092d719e9627028125c',
   'v8/third_party/icu':
     Var('chromium_url') + '/chromium/deps/icu.git' + '@' + '682a230923933a7157a41b88c7804b6b7d2abdfa',
   'v8/third_party/instrumented_libraries':
@@ -153,7 +153,7 @@ deps = {
       'dep_type': 'cipd',
   },
   'v8/third_party/catapult': {
-    'url': Var('chromium_url') + '/catapult.git' + '@' + '93ee550c1fe841b822f3a714f63245594c616522',
+    'url': Var('chromium_url') + '/catapult.git' + '@' + '30604c6c8ec1c53b63a2340d0a81acfb1cb12f99',
     'condition': 'checkout_android',
   },
   'v8/third_party/colorama/src': {
@@ -165,7 +165,7 @@ deps = {
     'condition': 'checkout_fuchsia',
   },
   'v8/third_party/googletest/src':
-    Var('chromium_url') + '/external/github.com/google/googletest.git' + '@' + 'a45c24ac1878932e0dc5fbc0d78a699befd386d3',
+    Var('chromium_url') + '/external/github.com/google/googletest.git' + '@' + '90a443f9c2437ca8a682a1ac625eba64e1d74a8a',
   'v8/third_party/jinja2':
     Var('chromium_url') + '/chromium/src/third_party/jinja2.git' + '@' + 'b41863e42637544c2941b574c7877d3e1f663e25',
   'v8/third_party/markupsafe':
@@ -201,7 +201,7 @@ deps = {
       'dep_type': 'cipd',
   },
   'v8/tools/clang':
-    Var('chromium_url') + '/chromium/src/tools/clang.git' + '@' + 'cd2137ffa2e47b163b78d84d275705b09d2a0cfe',
+    Var('chromium_url') + '/chromium/src/tools/clang.git' + '@' + '3605577b67603ec5776afcfada9e0ff4ea05cf0e',
   'v8/tools/luci-go': {
       'packages': [
         {
@@ -233,7 +233,7 @@ deps = {
   'v8/test/wasm-js/data':
     Var('chromium_url') + '/external/github.com/WebAssembly/spec.git' + '@' + 'a221f2574d7106e92cf8abaf05d5bb1131b19d76',
   'v8/third_party/perfetto':
-    Var('android_url') + '/platform/external/perfetto.git' + '@' + '0e8281399fd854de13461f2c1c9f2fb0b8e9c3ae',
+    Var('android_url') + '/platform/external/perfetto.git' + '@' + '3150f3961532dccfe18a6c87c9494f754d3b6a51',
   'v8/third_party/protobuf':
     Var('chromium_url') + '/external/github.com/google/protobuf'+ '@' + 'b68a347f56137b4b1a746e8c7438495a6ac1bd91',
 }

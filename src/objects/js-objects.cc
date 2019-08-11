@@ -1614,12 +1614,14 @@ Maybe<bool> JSReceiver::GetOwnPropertyDescriptor(LookupIterator* it,
     // 6. Else X is an accessor property, so
     Handle<AccessorPair> accessors =
         Handle<AccessorPair>::cast(it->GetAccessors());
+    Handle<NativeContext> native_context =
+        it->GetHolder<JSReceiver>()->GetCreationContext();
     // 6a. Set D.[[Get]] to the value of X's [[Get]] attribute.
-    desc->set_get(
-        AccessorPair::GetComponent(isolate, accessors, ACCESSOR_GETTER));
+    desc->set_get(AccessorPair::GetComponent(isolate, native_context, accessors,
+                                             ACCESSOR_GETTER));
     // 6b. Set D.[[Set]] to the value of X's [[Set]] attribute.
-    desc->set_set(
-        AccessorPair::GetComponent(isolate, accessors, ACCESSOR_SETTER));
+    desc->set_set(AccessorPair::GetComponent(isolate, native_context, accessors,
+                                             ACCESSOR_SETTER));
   }
 
   // 7. Set D.[[Enumerable]] to the value of X's [[Enumerable]] attribute.
@@ -4994,13 +4996,9 @@ void JSFunction::InitializeFeedbackCell(Handle<JSFunction> function) {
   Isolate* const isolate = function->GetIsolate();
 
   if (function->has_feedback_vector()) {
-    // TODO(984344): Make this a CHECK that feedback vectors are identical to
-    // what we expect once we have removed all bytecode generation differences
-    // between eager and lazy compilation. For now just reset if they aren't
-    // identical
-    FeedbackVector vector = function->feedback_vector();
-    if (vector.length() == vector.metadata().slot_count()) return;
-    function->raw_feedback_cell().reset();
+    CHECK_EQ(function->feedback_vector().length(),
+             function->feedback_vector().metadata().slot_count());
+    return;
   }
 
   bool needs_feedback_vector = !FLAG_lazy_feedback_allocation;

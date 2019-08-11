@@ -310,13 +310,19 @@ namespace {
 
 bool EnsureFeedbackVector(Handle<JSFunction> function) {
   // Check function allows lazy compilation.
-  if (!function->shared().allows_lazy_compilation()) {
-    return false;
-  }
+  if (!function->shared().allows_lazy_compilation()) return false;
+
+  if (function->has_feedback_vector()) return true;
 
   // If function isn't compiled, compile it now.
   IsCompiledScope is_compiled_scope(function->shared().is_compiled_scope());
-  if (!is_compiled_scope.is_compiled() &&
+  // If the JSFunction isn't compiled but it has a initialized feedback cell
+  // then no need to compile. CompileLazy builtin would handle these cases by
+  // installing the code from SFI. Calling compile here may cause another
+  // optimization if FLAG_always_opt is set.
+  bool needs_compilation =
+      !function->is_compiled() && !function->has_closure_feedback_cell_array();
+  if (needs_compilation &&
       !Compiler::Compile(function, Compiler::CLEAR_EXCEPTION,
                          &is_compiled_scope)) {
     return false;
@@ -1088,22 +1094,17 @@ RUNTIME_FUNCTION(Runtime_SerializeWasmModule) {
 
   wasm::NativeModule* native_module = module_obj->native_module();
   wasm::WasmSerializer wasm_serializer(native_module);
-  size_t byte_length = wasm_serializer.GetSerializedNativeModuleSize();
-
-  MaybeHandle<JSArrayBuffer> result =
-      isolate->factory()->NewJSArrayBufferAndBackingStore(
-          byte_length, InitializedFlag::kUninitialized);
-
-  Handle<JSArrayBuffer> array_buffer;
-  if (result.ToHandle(&array_buffer) &&
-      wasm_serializer.SerializeNativeModule(
-          {reinterpret_cast<uint8_t*>(array_buffer->backing_store()),
-           byte_length})) {
-    return *array_buffer;
+  size_t compiled_size = wasm_serializer.GetSerializedNativeModuleSize();
+  void* array_data = isolate->array_buffer_allocator()->Allocate(compiled_size);
+  Handle<JSArrayBuffer> array_buffer =
+      isolate->factory()->NewJSArrayBuffer(SharedFlag::kNotShared);
+  JSArrayBuffer::Setup(array_buffer, isolate, false, array_data, compiled_size);
+  if (!array_data ||
+      !wasm_serializer.SerializeNativeModule(
+          {reinterpret_cast<uint8_t*>(array_data), compiled_size})) {
+    return ReadOnlyRoots(isolate).undefined_value();
   }
-
-  // Error. Return undefined.
-  return ReadOnlyRoots(isolate).undefined_value();
+  return *array_buffer;
 }
 
 // Take an array buffer and attempt to reconstruct a compiled wasm module.

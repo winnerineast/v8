@@ -65,6 +65,7 @@ namespace internal {
   T(LBRACK, "[", 0)                                                \
   /* END Property */                                               \
   /* END Member */                                                 \
+  T(QUESTION_PERIOD, "?.", 0)                                      \
   T(LPAREN, "(", 0)                                                \
   /* END PropertyOrCall */                                         \
   T(RPAREN, ")", 0)                                                \
@@ -216,7 +217,7 @@ class V8_EXPORT_PRIVATE Token {
   }
 
   using IsKeywordBits = BitField8<bool, 0, 1>;
-  using IsPropertyNameBits = BitField8<bool, IsKeywordBits::kNext, 1>;
+  using IsPropertyNameBits = IsKeywordBits::Next<bool, 1>;
 
   // Predicates
   static bool IsKeyword(Value token) {
