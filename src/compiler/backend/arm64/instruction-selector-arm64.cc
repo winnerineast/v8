@@ -51,6 +51,7 @@ class Arm64OperandGenerator final : public OperandGenerator {
   // Use the stack pointer if the node is LoadStackPointer, otherwise assign a
   // register.
   InstructionOperand UseRegisterOrStackPointer(Node* node, bool sp_allowed) {
+    // TODO(jgruber): Remove this once LoadStackPointer has been removed.
     if (sp_allowed && node->opcode() == IrOpcode::kLoadStackPointer)
       return LocationOperand(LocationOperand::EXPLICIT,
                              LocationOperand::REGISTER,
@@ -563,23 +564,21 @@ void EmitLoad(InstructionSelector* selector, Node* node, InstructionCode opcode,
   // is used when we merge a conversion into the load.
   outputs[0] = g.DefineAsRegister(output == nullptr ? node : output);
 
-  if (selector->CanAddressRelativeToRootsRegister()) {
-    ExternalReferenceMatcher m(base);
-    if (m.HasValue() && g.IsIntegerConstant(index)) {
-      ptrdiff_t const delta =
-          g.GetIntegerConstantValue(index) +
-          TurboAssemblerBase::RootRegisterOffsetForExternalReference(
-              selector->isolate(), m.Value());
-      input_count = 1;
-      // Check that the delta is a 32-bit integer due to the limitations of
-      // immediate operands.
-      if (is_int32(delta)) {
-        inputs[0] = g.UseImmediate(static_cast<int32_t>(delta));
-        opcode |= AddressingModeField::encode(kMode_Root);
-        selector->Emit(opcode, arraysize(outputs), outputs, input_count,
-                       inputs);
-        return;
-      }
+  ExternalReferenceMatcher m(base);
+  if (m.HasValue() && g.IsIntegerConstant(index) &&
+      selector->CanAddressRelativeToRootsRegister(m.Value())) {
+    ptrdiff_t const delta =
+        g.GetIntegerConstantValue(index) +
+        TurboAssemblerBase::RootRegisterOffsetForExternalReference(
+            selector->isolate(), m.Value());
+    input_count = 1;
+    // Check that the delta is a 32-bit integer due to the limitations of
+    // immediate operands.
+    if (is_int32(delta)) {
+      inputs[0] = g.UseImmediate(static_cast<int32_t>(delta));
+      opcode |= AddressingModeField::encode(kMode_Root);
+      selector->Emit(opcode, arraysize(outputs), outputs, input_count, inputs);
+      return;
     }
   }
 
@@ -1012,6 +1011,15 @@ void InstructionSelector::VisitWord64Shl(Node* node) {
     return;
   }
   VisitRRO(this, kArm64Lsl, node, kShift64Imm);
+}
+
+void InstructionSelector::VisitStackPointerGreaterThan(
+    Node* node, FlagsContinuation* cont) {
+  Node* const value = node->InputAt(0);
+  InstructionCode opcode = kArchStackPointerGreaterThan;
+
+  Arm64OperandGenerator g(this);
+  EmitWithContinuation(opcode, g.UseRegister(value), cont);
 }
 
 namespace {
@@ -1841,6 +1849,7 @@ void VisitWordCompare(InstructionSelector* selector, Node* node,
   Node* left = node->InputAt(0);
   Node* right = node->InputAt(1);
 
+  // TODO(jgruber): Remove this once LoadStackPointer has been removed.
   if (right->opcode() == IrOpcode::kLoadStackPointer ||
       g.CanBeImmediate(left, immediate_mode)) {
     if (!commutative) cont->Commute();
@@ -2481,6 +2490,9 @@ void InstructionSelector::VisitWordCompareZero(Node* user, Node* value,
       case IrOpcode::kWord64And:
         return VisitWordCompare(this, value, kArm64Tst, cont, true,
                                 kLogical64Imm);
+      case IrOpcode::kStackPointerGreaterThan:
+        cont->OverwriteAndNegateIfEqual(kStackPointerGreaterThanCondition);
+        return VisitStackPointerGreaterThan(value, cont);
       default:
         break;
     }
