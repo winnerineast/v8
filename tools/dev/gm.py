@@ -30,7 +30,8 @@ USE_PTY = "linux" in sys.platform
 if USE_PTY:
   import pty
 
-BUILD_TARGETS_TEST = ["d8", "cctest", "unittests"]
+BUILD_TARGETS_TEST = ["d8", "cctest", "inspector-test", "unittests",
+                      "wasm_api_tests"]
 BUILD_TARGETS_ALL = ["all"]
 
 # All arches that this script understands.
@@ -86,6 +87,8 @@ TESTSUITES_TARGETS = {"benchmarks": "d8",
               "test262": "d8",
               "unittests": "unittests",
               "wasm-api-tests": "wasm_api_tests",
+              "wasm-js": "d8",
+              "wasm-spec-tests": "d8",
               "webkit": "d8"}
 
 OUTDIR = "out"

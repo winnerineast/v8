@@ -40,6 +40,9 @@ namespace internal {
  * Each call to a public method should retain this convention.
  *
  * The stack will have the following structure:
+ *  - fp[56]  Address regexp     (address of the JSRegExp object; unused in
+ *                                native code, passed to match signature of
+ *                                the interpreter)
  *  - fp[52]  Isolate* isolate   (address of the current isolate)
  *  - fp[48]  direct_call        (if 1, direct call from JavaScript code,
  *                                if 0, call through the runtime system).
@@ -83,7 +86,8 @@ namespace internal {
  *              int num_capture_registers,
  *              byte* stack_area_base,
  *              bool direct_call = false,
- *              Isolate* isolate);
+ *              Isolate* isolate,
+ *              Address regexp);
  * The call is performed by NativeRegExpMacroAssembler::Execute()
  * (in regexp-macro-assembler.cc) via the GeneratedCode wrapper.
  */
@@ -150,6 +154,19 @@ void RegExpMacroAssemblerARM::AdvanceRegister(int reg, int by) {
 
 void RegExpMacroAssemblerARM::Backtrack() {
   CheckPreemption();
+  if (has_backtrack_limit()) {
+    Label next;
+    __ ldr(r0, MemOperand(frame_pointer(), kBacktrackCount));
+    __ add(r0, r0, Operand(1));
+    __ str(r0, MemOperand(frame_pointer(), kBacktrackCount));
+    __ cmp(r0, Operand(backtrack_limit()));
+    __ b(ne, &next);
+
+    // Exceeded limits are treated as a failed match.
+    Fail();
+
+    __ bind(&next);
+  }
   // Pop Code offset from backtrack stack, add Code and jump to location.
   Pop(r0);
   __ add(pc, r0, Operand(code_pointer()));
@@ -172,14 +189,13 @@ void RegExpMacroAssemblerARM::CheckCharacterGT(uc16 limit, Label* on_greater) {
   BranchOrBacktrack(gt, on_greater);
 }
 
-
-void RegExpMacroAssemblerARM::CheckAtStart(Label* on_at_start) {
+void RegExpMacroAssemblerARM::CheckAtStart(int cp_offset, Label* on_at_start) {
   __ ldr(r1, MemOperand(frame_pointer(), kStringStartMinusOne));
-  __ add(r0, current_input_offset(), Operand(-char_size()));
+  __ add(r0, current_input_offset(),
+         Operand(-char_size() + cp_offset * char_size()));
   __ cmp(r0, r1);
   BranchOrBacktrack(eq, on_at_start);
 }
-
 
 void RegExpMacroAssemblerARM::CheckNotAtStart(int cp_offset,
                                               Label* on_not_at_start) {
@@ -639,15 +655,22 @@ Handle<HeapObject> RegExpMacroAssemblerARM::GetCode(Handle<String> source) {
   // Set frame pointer in space for it if this is not a direct call
   // from generated code.
   __ add(frame_pointer(), sp, Operand(4 * kPointerSize));
+
+  STATIC_ASSERT(kSuccessfulCaptures == kInputString - kSystemPointerSize);
   __ mov(r0, Operand::Zero());
   __ push(r0);  // Make room for success counter and initialize it to 0.
+  STATIC_ASSERT(kStringStartMinusOne ==
+                kSuccessfulCaptures - kSystemPointerSize);
   __ push(r0);  // Make room for "string start - 1" constant.
+  STATIC_ASSERT(kBacktrackCount == kStringStartMinusOne - kSystemPointerSize);
+  __ push(r0);  // The backtrack counter.
+
   // Check if we have space on the stack for registers.
   Label stack_limit_hit;
   Label stack_ok;
 
   ExternalReference stack_limit =
-      ExternalReference::address_of_stack_limit(isolate());
+      ExternalReference::address_of_jslimit(isolate());
   __ mov(r0, Operand(stack_limit));
   __ ldr(r0, MemOperand(r0));
   __ sub(r0, sp, r0, SetCC);
@@ -1070,17 +1093,10 @@ void RegExpMacroAssemblerARM::CallCheckStackGuardState() {
       ExternalReference::re_check_stack_guard_state(isolate());
   __ mov(ip, Operand(stack_guard_check));
 
-  if (FLAG_embedded_builtins) {
-    EmbeddedData d = EmbeddedData::FromBlob();
-    CHECK(Builtins::IsIsolateIndependent(Builtins::kDirectCEntry));
-    Address entry = d.InstructionStartOfBuiltin(Builtins::kDirectCEntry);
-    __ mov(lr, Operand(entry, RelocInfo::OFF_HEAP_TARGET));
-  } else {
-    // TODO(v8:8519): Remove this once embedded builtins are on unconditionally.
-    Handle<Code> code = BUILTIN_CODE(isolate(), DirectCEntry);
-    __ mov(lr, Operand(reinterpret_cast<intptr_t>(code.location()),
-                       RelocInfo::CODE_TARGET));
-  }
+  EmbeddedData d = EmbeddedData::FromBlob();
+  CHECK(Builtins::IsIsolateIndependent(Builtins::kDirectCEntry));
+  Address entry = d.InstructionStartOfBuiltin(Builtins::kDirectCEntry);
+  __ mov(lr, Operand(entry, RelocInfo::OFF_HEAP_TARGET));
   __ Call(lr);
 
   // Drop the return address from the stack.
@@ -1197,7 +1213,7 @@ void RegExpMacroAssemblerARM::Pop(Register target) {
 void RegExpMacroAssemblerARM::CheckPreemption() {
   // Check for preemption.
   ExternalReference stack_limit =
-      ExternalReference::address_of_stack_limit(isolate());
+      ExternalReference::address_of_jslimit(isolate());
   __ mov(r0, Operand(stack_limit));
   __ ldr(r0, MemOperand(r0));
   __ cmp(sp, r0);
@@ -1207,7 +1223,7 @@ void RegExpMacroAssemblerARM::CheckPreemption() {
 
 void RegExpMacroAssemblerARM::CheckStackLimit() {
   ExternalReference stack_limit =
-      ExternalReference::address_of_regexp_stack_limit(isolate());
+      ExternalReference::address_of_regexp_stack_limit_address(isolate());
   __ mov(r0, Operand(stack_limit));
   __ ldr(r0, MemOperand(r0));
   __ cmp(backtrack_stackpointer(), Operand(r0));

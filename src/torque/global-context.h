@@ -6,7 +6,9 @@
 #define V8_TORQUE_GLOBAL_CONTEXT_H_
 
 #include <map>
+#include <memory>
 
+#include "src/common/globals.h"
 #include "src/torque/ast.h"
 #include "src/torque/contextual.h"
 #include "src/torque/declarable.h"
@@ -62,7 +64,9 @@ class GlobalContext : public ContextualClass<GlobalContext> {
     return Get().force_assert_statements_;
   }
   static Ast* ast() { return &Get().ast_; }
-  static size_t FreshId() { return Get().fresh_id_++; }
+  static std::string MakeUniqueName(const std::string& base) {
+    return base + "_" + std::to_string(Get().fresh_ids_[base]++);
+  }
 
   struct PerFileStreams {
     std::stringstream csa_headerfile;
@@ -81,7 +85,7 @@ class GlobalContext : public ContextualClass<GlobalContext> {
   std::vector<std::string> cpp_includes_;
   std::map<SourceId, PerFileStreams> generated_per_file_;
   GlobalClassList classes_;
-  size_t fresh_id_ = 0;
+  std::map<std::string, size_t> fresh_ids_;
 
   friend class LanguageServerData;
 };
@@ -90,6 +94,18 @@ template <class T>
 T* RegisterDeclarable(std::unique_ptr<T> d) {
   return GlobalContext::Get().RegisterDeclarable(std::move(d));
 }
+
+class TargetArchitecture : public ContextualClass<TargetArchitecture> {
+ public:
+  explicit TargetArchitecture(bool force_32bit);
+
+  static int TaggedSize() { return Get().tagged_size_; }
+  static int RawPtrSize() { return Get().raw_ptr_size_; }
+
+ private:
+  const int tagged_size_;
+  const int raw_ptr_size_;
+};
 
 }  // namespace torque
 }  // namespace internal

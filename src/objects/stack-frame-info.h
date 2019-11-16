@@ -22,6 +22,7 @@ class StackFrameInfo : public Struct {
   DECL_INT_ACCESSORS(line_number)
   DECL_INT_ACCESSORS(column_number)
   DECL_INT_ACCESSORS(script_id)
+  DECL_INT_ACCESSORS(wasm_function_index)
   DECL_INT_ACCESSORS(promise_all_index)
   // Wasm frames only: function_offset instead of promise_all_index.
   DECL_INT_ACCESSORS(function_offset)
@@ -71,22 +72,15 @@ class StackFrameInfo : public Struct {
 // The first time any of the Get* or Is* methods is called, a
 // StackFrameInfo object is allocated and all necessary information
 // retrieved.
-class StackTraceFrame : public Struct {
+class StackTraceFrame
+    : public TorqueGeneratedStackTraceFrame<StackTraceFrame, Struct> {
  public:
   NEVER_READ_ONLY_SPACE
-  DECL_ACCESSORS(frame_array, Object)
   DECL_INT_ACCESSORS(frame_index)
-  DECL_ACCESSORS(frame_info, Object)
   DECL_INT_ACCESSORS(id)
-
-  DECL_CAST(StackTraceFrame)
 
   // Dispatched behavior.
   DECL_PRINTER(StackTraceFrame)
-  DECL_VERIFIER(StackTraceFrame)
-
-  DEFINE_FIELD_OFFSET_CONSTANTS(Struct::kHeaderSize,
-                                TORQUE_GENERATED_STACK_TRACE_FRAME_FIELDS)
 
   static int GetLineNumber(Handle<StackTraceFrame> frame);
   static int GetOneBasedLineNumber(Handle<StackTraceFrame> frame);
@@ -95,6 +89,7 @@ class StackTraceFrame : public Struct {
   static int GetScriptId(Handle<StackTraceFrame> frame);
   static int GetPromiseAllIndex(Handle<StackTraceFrame> frame);
   static int GetFunctionOffset(Handle<StackTraceFrame> frame);
+  static int GetWasmFunctionIndex(Handle<StackTraceFrame> frame);
 
   static Handle<Object> GetFileName(Handle<StackTraceFrame> frame);
   static Handle<Object> GetScriptNameOrSourceUrl(Handle<StackTraceFrame> frame);
@@ -116,10 +111,10 @@ class StackTraceFrame : public Struct {
   static bool IsPromiseAll(Handle<StackTraceFrame> frame);
 
  private:
-  OBJECT_CONSTRUCTORS(StackTraceFrame, Struct);
-
   static Handle<StackFrameInfo> GetFrameInfo(Handle<StackTraceFrame> frame);
   static void InitializeFrameInfo(Handle<StackTraceFrame> frame);
+
+  TQ_OBJECT_CONSTRUCTORS(StackTraceFrame)
 };
 
 // Small helper that retrieves the FrameArray from a stack-trace
@@ -131,10 +126,8 @@ Handle<FrameArray> GetFrameArrayFromStackTrace(Isolate* isolate,
                                                Handle<FixedArray> stack_trace);
 
 class IncrementalStringBuilder;
-void SerializeStackTraceFrame(
-    Isolate* isolate, Handle<StackTraceFrame> frame,
-    IncrementalStringBuilder& builder  // NOLINT(runtime/references)
-);
+void SerializeStackTraceFrame(Isolate* isolate, Handle<StackTraceFrame> frame,
+                              IncrementalStringBuilder* builder);
 MaybeHandle<String> SerializeStackTraceFrame(Isolate* isolate,
                                              Handle<StackTraceFrame> frame);
 

@@ -10,6 +10,7 @@
 #include "src/diagnostics/disassembler.h"
 #include "src/heap/combined-heap.h"
 #include "src/heap/heap-write-barrier-inl.h"
+#include "src/heap/read-only-heap.h"
 #include "src/ic/handler-configuration-inl.h"
 #include "src/init/bootstrapper.h"
 #include "src/logging/counters.h"
@@ -26,6 +27,7 @@
 #include "src/objects/field-type.h"
 #include "src/objects/foreign-inl.h"
 #include "src/objects/free-space-inl.h"
+#include "src/objects/function-kind.h"
 #include "src/objects/hash-table-inl.h"
 #include "src/objects/js-array-inl.h"
 #include "src/objects/layout-descriptor.h"
@@ -155,30 +157,9 @@ void HeapObject::HeapObjectVerify(Isolate* isolate) {
       String::cast(*this).StringVerify(isolate);
     }
     break;
-    case SYMBOL_TYPE:
-      Symbol::cast(*this).SymbolVerify(isolate);
-      break;
-    case MAP_TYPE:
-      Map::cast(*this).MapVerify(isolate);
-      break;
-    case HEAP_NUMBER_TYPE:
-      CHECK(IsHeapNumber());
-      break;
-    case MUTABLE_HEAP_NUMBER_TYPE:
-      CHECK(IsMutableHeapNumber());
-      break;
-    case BIGINT_TYPE:
-      BigInt::cast(*this).BigIntVerify(isolate);
-      break;
-    case CALL_HANDLER_INFO_TYPE:
-      CallHandlerInfo::cast(*this).CallHandlerInfoVerify(isolate);
-      break;
     case OBJECT_BOILERPLATE_DESCRIPTION_TYPE:
       ObjectBoilerplateDescription::cast(*this)
           .ObjectBoilerplateDescriptionVerify(isolate);
-      break;
-    case EMBEDDER_DATA_ARRAY_TYPE:
-      EmbedderDataArray::cast(*this).EmbedderDataArrayVerify(isolate);
       break;
     // FixedArray types
     case CLOSURE_FEEDBACK_CELL_ARRAY_TYPE:
@@ -214,45 +195,15 @@ void HeapObject::HeapObjectVerify(Isolate* isolate) {
     case WEAK_FIXED_ARRAY_TYPE:
       WeakFixedArray::cast(*this).WeakFixedArrayVerify(isolate);
       break;
-    case WEAK_ARRAY_LIST_TYPE:
-      WeakArrayList::cast(*this).WeakArrayListVerify(isolate);
-      break;
-    case FIXED_DOUBLE_ARRAY_TYPE:
-      FixedDoubleArray::cast(*this).FixedDoubleArrayVerify(isolate);
-      break;
     case FEEDBACK_METADATA_TYPE:
       FeedbackMetadata::cast(*this).FeedbackMetadataVerify(isolate);
-      break;
-    case BYTE_ARRAY_TYPE:
-      ByteArray::cast(*this).ByteArrayVerify(isolate);
-      break;
-    case BYTECODE_ARRAY_TYPE:
-      BytecodeArray::cast(*this).BytecodeArrayVerify(isolate);
-      break;
-    case DESCRIPTOR_ARRAY_TYPE:
-      DescriptorArray::cast(*this).DescriptorArrayVerify(isolate);
       break;
     case TRANSITION_ARRAY_TYPE:
       TransitionArray::cast(*this).TransitionArrayVerify(isolate);
       break;
-    case PROPERTY_ARRAY_TYPE:
-      PropertyArray::cast(*this).PropertyArrayVerify(isolate);
-      break;
-    case FREE_SPACE_TYPE:
-      FreeSpace::cast(*this).FreeSpaceVerify(isolate);
-      break;
-    case FEEDBACK_CELL_TYPE:
-      FeedbackCell::cast(*this).FeedbackCellVerify(isolate);
-      break;
-    case FEEDBACK_VECTOR_TYPE:
-      FeedbackVector::cast(*this).FeedbackVectorVerify(isolate);
-      break;
 
     case CODE_TYPE:
       Code::cast(*this).CodeVerify(isolate);
-      break;
-    case ODDBALL_TYPE:
-      Oddball::cast(*this).OddballVerify(isolate);
       break;
     case JS_OBJECT_TYPE:
     case JS_ERROR_TYPE:
@@ -261,71 +212,11 @@ void HeapObject::HeapObjectVerify(Isolate* isolate) {
     case JS_CONTEXT_EXTENSION_OBJECT_TYPE:
       JSObject::cast(*this).JSObjectVerify(isolate);
       break;
-    case WASM_MODULE_TYPE:
-      WasmModuleObject::cast(*this).WasmModuleObjectVerify(isolate);
-      break;
-    case WASM_TABLE_TYPE:
-      WasmTableObject::cast(*this).WasmTableObjectVerify(isolate);
-      break;
-    case WASM_MEMORY_TYPE:
-      WasmMemoryObject::cast(*this).WasmMemoryObjectVerify(isolate);
-      break;
-    case WASM_GLOBAL_TYPE:
-      WasmGlobalObject::cast(*this).WasmGlobalObjectVerify(isolate);
-      break;
-    case WASM_EXCEPTION_TYPE:
-      WasmExceptionObject::cast(*this).WasmExceptionObjectVerify(isolate);
-      break;
-    case WASM_INSTANCE_TYPE:
+    case WASM_INSTANCE_OBJECT_TYPE:
       WasmInstanceObject::cast(*this).WasmInstanceObjectVerify(isolate);
-      break;
-    case JS_ARGUMENTS_TYPE:
-      JSArgumentsObject::cast(*this).JSArgumentsObjectVerify(isolate);
       break;
     case JS_GENERATOR_OBJECT_TYPE:
       JSGeneratorObject::cast(*this).JSGeneratorObjectVerify(isolate);
-      break;
-    case JS_ASYNC_FUNCTION_OBJECT_TYPE:
-      JSAsyncFunctionObject::cast(*this).JSAsyncFunctionObjectVerify(isolate);
-      break;
-    case JS_ASYNC_GENERATOR_OBJECT_TYPE:
-      JSAsyncGeneratorObject::cast(*this).JSAsyncGeneratorObjectVerify(isolate);
-      break;
-    case JS_PRIMITIVE_WRAPPER_TYPE:
-      JSPrimitiveWrapper::cast(*this).JSPrimitiveWrapperVerify(isolate);
-      break;
-    case JS_DATE_TYPE:
-      JSDate::cast(*this).JSDateVerify(isolate);
-      break;
-    case JS_BOUND_FUNCTION_TYPE:
-      JSBoundFunction::cast(*this).JSBoundFunctionVerify(isolate);
-      break;
-    case JS_FUNCTION_TYPE:
-      JSFunction::cast(*this).JSFunctionVerify(isolate);
-      break;
-    case JS_GLOBAL_PROXY_TYPE:
-      JSGlobalProxy::cast(*this).JSGlobalProxyVerify(isolate);
-      break;
-    case JS_GLOBAL_OBJECT_TYPE:
-      JSGlobalObject::cast(*this).JSGlobalObjectVerify(isolate);
-      break;
-    case CELL_TYPE:
-      Cell::cast(*this).CellVerify(isolate);
-      break;
-    case PROPERTY_CELL_TYPE:
-      PropertyCell::cast(*this).PropertyCellVerify(isolate);
-      break;
-    case JS_ARRAY_TYPE:
-      JSArray::cast(*this).JSArrayVerify(isolate);
-      break;
-    case JS_MODULE_NAMESPACE_TYPE:
-      JSModuleNamespace::cast(*this).JSModuleNamespaceVerify(isolate);
-      break;
-    case JS_SET_TYPE:
-      JSSet::cast(*this).JSSetVerify(isolate);
-      break;
-    case JS_MAP_TYPE:
-      JSMap::cast(*this).JSMapVerify(isolate);
       break;
     case JS_SET_KEY_VALUE_ITERATOR_TYPE:
     case JS_SET_VALUE_ITERATOR_TYPE:
@@ -336,77 +227,7 @@ void HeapObject::HeapObjectVerify(Isolate* isolate) {
     case JS_MAP_VALUE_ITERATOR_TYPE:
       JSMapIterator::cast(*this).JSMapIteratorVerify(isolate);
       break;
-    case JS_ARRAY_ITERATOR_TYPE:
-      JSArrayIterator::cast(*this).JSArrayIteratorVerify(isolate);
-      break;
-    case JS_STRING_ITERATOR_TYPE:
-      JSStringIterator::cast(*this).JSStringIteratorVerify(isolate);
-      break;
-    case JS_ASYNC_FROM_SYNC_ITERATOR_TYPE:
-      JSAsyncFromSyncIterator::cast(*this).JSAsyncFromSyncIteratorVerify(
-          isolate);
-      break;
-    case WEAK_CELL_TYPE:
-      WeakCell::cast(*this).WeakCellVerify(isolate);
-      break;
-    case JS_WEAK_REF_TYPE:
-      JSWeakRef::cast(*this).JSWeakRefVerify(isolate);
-      break;
-    case JS_FINALIZATION_GROUP_TYPE:
-      JSFinalizationGroup::cast(*this).JSFinalizationGroupVerify(isolate);
-      break;
-    case JS_FINALIZATION_GROUP_CLEANUP_ITERATOR_TYPE:
-      JSFinalizationGroupCleanupIterator::cast(*this)
-          .JSFinalizationGroupCleanupIteratorVerify(isolate);
-      break;
-    case JS_WEAK_MAP_TYPE:
-      JSWeakMap::cast(*this).JSWeakMapVerify(isolate);
-      break;
-    case JS_WEAK_SET_TYPE:
-      JSWeakSet::cast(*this).JSWeakSetVerify(isolate);
-      break;
-    case JS_PROMISE_TYPE:
-      JSPromise::cast(*this).JSPromiseVerify(isolate);
-      break;
-    case JS_REGEXP_TYPE:
-      JSRegExp::cast(*this).JSRegExpVerify(isolate);
-      break;
-    case JS_REGEXP_STRING_ITERATOR_TYPE:
-      JSRegExpStringIterator::cast(*this).JSRegExpStringIteratorVerify(isolate);
-      break;
     case FILLER_TYPE:
-      break;
-    case JS_PROXY_TYPE:
-      JSProxy::cast(*this).JSProxyVerify(isolate);
-      break;
-    case FOREIGN_TYPE:
-      Foreign::cast(*this).ForeignVerify(isolate);
-      break;
-    case PREPARSE_DATA_TYPE:
-      PreparseData::cast(*this).PreparseDataVerify(isolate);
-      break;
-    case UNCOMPILED_DATA_WITHOUT_PREPARSE_DATA_TYPE:
-      UncompiledDataWithoutPreparseData::cast(*this)
-          .UncompiledDataWithoutPreparseDataVerify(isolate);
-      break;
-    case UNCOMPILED_DATA_WITH_PREPARSE_DATA_TYPE:
-      UncompiledDataWithPreparseData::cast(*this)
-          .UncompiledDataWithPreparseDataVerify(isolate);
-      break;
-    case SHARED_FUNCTION_INFO_TYPE:
-      SharedFunctionInfo::cast(*this).SharedFunctionInfoVerify(isolate);
-      break;
-    case JS_MESSAGE_OBJECT_TYPE:
-      JSMessageObject::cast(*this).JSMessageObjectVerify(isolate);
-      break;
-    case JS_ARRAY_BUFFER_TYPE:
-      JSArrayBuffer::cast(*this).JSArrayBufferVerify(isolate);
-      break;
-    case JS_TYPED_ARRAY_TYPE:
-      JSTypedArray::cast(*this).JSTypedArrayVerify(isolate);
-      break;
-    case JS_DATA_VIEW_TYPE:
-      JSDataView::cast(*this).JSDataViewVerify(isolate);
       break;
     case SMALL_ORDERED_HASH_SET_TYPE:
       SmallOrderedHashSet::cast(*this).SmallOrderedHashSetVerify(isolate);
@@ -418,54 +239,18 @@ void HeapObject::HeapObjectVerify(Isolate* isolate) {
       SmallOrderedNameDictionary::cast(*this).SmallOrderedNameDictionaryVerify(
           isolate);
       break;
-    case SOURCE_TEXT_MODULE_TYPE:
-      SourceTextModule::cast(*this).SourceTextModuleVerify(isolate);
-      break;
-    case SYNTHETIC_MODULE_TYPE:
-      SyntheticModule::cast(*this).SyntheticModuleVerify(isolate);
-      break;
     case CODE_DATA_CONTAINER_TYPE:
       CodeDataContainer::cast(*this).CodeDataContainerVerify(isolate);
       break;
-#ifdef V8_INTL_SUPPORT
-    case JS_INTL_V8_BREAK_ITERATOR_TYPE:
-      JSV8BreakIterator::cast(*this).JSV8BreakIteratorVerify(isolate);
-      break;
-    case JS_INTL_COLLATOR_TYPE:
-      JSCollator::cast(*this).JSCollatorVerify(isolate);
-      break;
-    case JS_INTL_DATE_TIME_FORMAT_TYPE:
-      JSDateTimeFormat::cast(*this).JSDateTimeFormatVerify(isolate);
-      break;
-    case JS_INTL_LIST_FORMAT_TYPE:
-      JSListFormat::cast(*this).JSListFormatVerify(isolate);
-      break;
-    case JS_INTL_LOCALE_TYPE:
-      JSLocale::cast(*this).JSLocaleVerify(isolate);
-      break;
-    case JS_INTL_NUMBER_FORMAT_TYPE:
-      JSNumberFormat::cast(*this).JSNumberFormatVerify(isolate);
-      break;
-    case JS_INTL_PLURAL_RULES_TYPE:
-      JSPluralRules::cast(*this).JSPluralRulesVerify(isolate);
-      break;
-    case JS_INTL_RELATIVE_TIME_FORMAT_TYPE:
-      JSRelativeTimeFormat::cast(*this).JSRelativeTimeFormatVerify(isolate);
-      break;
-    case JS_INTL_SEGMENT_ITERATOR_TYPE:
-      JSSegmentIterator::cast(*this).JSSegmentIteratorVerify(isolate);
-      break;
-    case JS_INTL_SEGMENTER_TYPE:
-      JSSegmenter::cast(*this).JSSegmenterVerify(isolate);
-      break;
-#endif  // V8_INTL_SUPPORT
 
-#define MAKE_STRUCT_CASE(TYPE, Name, name)   \
+#define MAKE_TORQUE_CASE(Name, TYPE)         \
   case TYPE:                                 \
     Name::cast(*this).Name##Verify(isolate); \
     break;
-      STRUCT_LIST(MAKE_STRUCT_CASE)
-#undef MAKE_STRUCT_CASE
+      // Every class that has its fields defined in a .tq file and corresponds
+      // to exactly one InstanceType value is included in the following list.
+      TORQUE_INSTANCE_CHECKERS_SINGLE_FULLY_DEFINED(MAKE_TORQUE_CASE)
+#undef MAKE_TORQUE_CASE
 
     case ALLOCATION_SITE_TYPE:
       AllocationSite::cast(*this).AllocationSiteVerify(isolate);
@@ -491,8 +276,9 @@ void Symbol::SymbolVerify(Isolate* isolate) {
   TorqueGeneratedClassVerifiers::SymbolVerify(*this, isolate);
   CHECK(HasHashCode());
   CHECK_GT(Hash(), 0);
-  CHECK(name().IsUndefined(isolate) || name().IsString());
+  CHECK(description().IsUndefined(isolate) || description().IsString());
   CHECK_IMPLIES(IsPrivateName(), IsPrivate());
+  CHECK_IMPLIES(IsPrivateBrand(), IsPrivateName());
 }
 
 USE_TORQUE_VERIFIER(ByteArray)
@@ -515,14 +301,9 @@ void BytecodeArray::BytecodeArrayVerify(Isolate* isolate) {
 
 USE_TORQUE_VERIFIER(FreeSpace)
 
-USE_TORQUE_VERIFIER(FeedbackCell)
+USE_TORQUE_VERIFIER(HeapNumber)
 
-void FeedbackVector::FeedbackVectorVerify(Isolate* isolate) {
-  TorqueGeneratedClassVerifiers::FeedbackVectorVerify(*this, isolate);
-  MaybeObject code = optimized_code_weak_or_smi();
-  MaybeObject::VerifyMaybeObjectPointer(isolate, code);
-  CHECK(code->IsSmi() || code->IsWeakOrCleared());
-}
+USE_TORQUE_VERIFIER(FeedbackVector)
 
 USE_TORQUE_VERIFIER(JSReceiver)
 
@@ -582,7 +363,7 @@ void JSObject::JSObjectVerify(Isolate* isolate) {
       // There are two reasons why this can happen:
       // - in the middle of StoreTransitionStub when the new extended backing
       //   store is already set into the object and the allocation of the
-      //   MutableHeapNumber triggers GC while the map isn't updated yet.
+      //   HeapNumber triggers GC while the map isn't updated yet.
       // - deletion of the last property can leave additional backing store
       //   capacity behind.
       CHECK_GT(actual_unused_property_fields, map().UnusedPropertyFields());
@@ -593,7 +374,7 @@ void JSObject::JSObjectVerify(Isolate* isolate) {
     bool is_transitionable_fast_elements_kind =
         IsTransitionableFastElementsKind(map().elements_kind());
 
-    for (int i = 0; i < map().NumberOfOwnDescriptors(); i++) {
+    for (InternalIndex i : map().IterateOwnDescriptors()) {
       PropertyDetails details = descriptors.GetDetails(i);
       if (details.location() == kField) {
         DCHECK_EQ(kData, details.kind());
@@ -607,7 +388,7 @@ void JSObject::JSObjectVerify(Isolate* isolate) {
           VerifyObjectField(isolate, index.offset());
         }
         Object value = RawFastPropertyAt(index);
-        if (r.IsDouble()) DCHECK(value.IsMutableHeapNumber());
+        if (r.IsDouble()) DCHECK(value.IsHeapNumber());
         if (value.IsUninitialized(isolate)) continue;
         if (r.IsSmi()) DCHECK(value.IsSmi());
         if (r.IsHeapObject()) DCHECK(value.IsHeapObject());
@@ -638,7 +419,7 @@ void JSObject::JSObjectVerify(Isolate* isolate) {
   // pointer may point to a one pointer filler map.
   if (ElementsAreSafeToExamine(isolate)) {
     CHECK_EQ((map().has_fast_smi_or_object_elements() ||
-              map().has_frozen_or_sealed_elements() ||
+              map().has_any_nonextensible_elements() ||
               (elements() == GetReadOnlyRoots().empty_fixed_array()) ||
               HasFastStringWrapperElements()),
              (elements().map() == GetReadOnlyRoots().fixed_array_map() ||
@@ -656,8 +437,12 @@ void Map::MapVerify(Isolate* isolate) {
   CHECK(instance_size() == kVariableSizeSentinel ||
         (kTaggedSize <= instance_size() &&
          static_cast<size_t>(instance_size()) < heap->Capacity()));
-  CHECK(GetBackPointer().IsUndefined(isolate) ||
-        !Map::cast(GetBackPointer()).is_stable());
+  if (IsContextMap()) {
+    CHECK(native_context().IsNativeContext());
+  } else {
+    CHECK_IMPLIES(!GetBackPointer().IsUndefined(isolate),
+                  !Map::cast(GetBackPointer()).is_stable());
+  }
   SLOW_DCHECK(instance_descriptors().IsSortedNoDuplicates());
   DisallowHeapAllocation no_gc;
   SLOW_DCHECK(
@@ -666,12 +451,15 @@ void Map::MapVerify(Isolate* isolate) {
                   .IsConsistentWithBackPointers());
   SLOW_DCHECK(!FLAG_unbox_double_fields ||
               layout_descriptor().IsConsistentWithMap(*this));
+  // Only JSFunction maps have has_prototype_slot() bit set and constructible
+  // JSFunction objects must have prototype slot.
+  CHECK_IMPLIES(has_prototype_slot(), instance_type() == JS_FUNCTION_TYPE);
   if (!may_have_interesting_symbols()) {
     CHECK(!has_named_interceptor());
     CHECK(!is_dictionary_map());
     CHECK(!is_access_check_needed());
     DescriptorArray const descriptors = instance_descriptors();
-    for (int i = 0; i < NumberOfOwnDescriptors(); ++i) {
+    for (InternalIndex i : IterateOwnDescriptors()) {
       CHECK(!descriptors.GetKey(i).IsInterestingSymbol());
     }
   }
@@ -681,10 +469,10 @@ void Map::MapVerify(Isolate* isolate) {
   CHECK_IMPLIES(IsJSObjectMap() && !CanHaveFastTransitionableElementsKind(),
                 IsDictionaryElementsKind(elements_kind()) ||
                     IsTerminalElementsKind(elements_kind()) ||
-                    IsHoleyFrozenOrSealedElementsKind(elements_kind()));
+                    IsAnyHoleyNonextensibleElementsKind(elements_kind()));
   CHECK_IMPLIES(is_deprecated(), !is_stable());
   if (is_prototype_map()) {
-    DCHECK(prototype_info() == Smi::kZero ||
+    DCHECK(prototype_info() == Smi::zero() ||
            prototype_info().IsPrototypeInfo());
   }
 }
@@ -698,8 +486,6 @@ void Map::DictionaryMapVerify(Isolate* isolate) {
   CHECK_EQ(0, UnusedPropertyFields());
   CHECK_EQ(Map::GetVisitorId(*this), visitor_id());
 }
-
-USE_TORQUE_VERIFIER(AliasedArgumentsEntry)
 
 void EmbedderDataArray::EmbedderDataArrayVerify(Isolate* isolate) {
   TorqueGeneratedClassVerifiers::EmbedderDataArrayVerify(*this, isolate);
@@ -722,13 +508,7 @@ void WeakFixedArray::WeakFixedArrayVerify(Isolate* isolate) {
   }
 }
 
-void WeakArrayList::WeakArrayListVerify(Isolate* isolate) {
-  VerifySmiField(kCapacityOffset);
-  VerifySmiField(kLengthOffset);
-  for (int i = 0; i < length(); i++) {
-    MaybeObject::VerifyMaybeObjectPointer(isolate, Get(i));
-  }
-}
+USE_TORQUE_VERIFIER(WeakArrayList)
 
 void PropertyArray::PropertyArrayVerify(Isolate* isolate) {
   TorqueGeneratedClassVerifiers::PropertyArrayVerify(*this, isolate);
@@ -770,7 +550,7 @@ void Context::ContextVerify(Isolate* isolate) {
 void NativeContext::NativeContextVerify(Isolate* isolate) {
   ContextVerify(isolate);
   CHECK_EQ(length(), NativeContext::NATIVE_CONTEXT_SLOTS);
-  CHECK_EQ(kSize, map().instance_size());
+  CHECK_EQ(kVariableSizeSentinel, map().instance_size());
 }
 
 void FeedbackMetadata::FeedbackMetadataVerify(Isolate* isolate) {
@@ -808,9 +588,9 @@ void DescriptorArray::DescriptorArrayVerify(Isolate* isolate) {
     // Check that properties with private symbols names are non-enumerable, and
     // that fields are in order.
     int expected_field_index = 0;
-    for (int descriptor = 0; descriptor < number_of_descriptors();
-         descriptor++) {
-      Object key = *(GetDescriptorSlot(descriptor) + kEntryKeyIndex);
+    for (InternalIndex descriptor :
+         InternalIndex::Range(number_of_descriptors())) {
+      Object key = *(GetDescriptorSlot(descriptor.as_int()) + kEntryKeyIndex);
       // number_of_descriptors() may be out of sync with the actual descriptors
       // written during descriptor array construction.
       if (key.IsUndefined(isolate)) continue;
@@ -913,8 +693,6 @@ void SloppyArgumentsElements::SloppyArgumentsElementsVerify(Isolate* isolate,
   CHECK_LE(maxMappedIndex, context_object.length());
   CHECK_LE(maxMappedIndex, arg_elements.length());
 }
-
-USE_TORQUE_VERIFIER(JSGeneratorObject)
 
 void JSAsyncFunctionObject::JSAsyncFunctionObjectVerify(Isolate* isolate) {
   TorqueGeneratedClassVerifiers::JSAsyncFunctionObjectVerify(*this, isolate);
@@ -1057,7 +835,7 @@ void SharedFunctionInfo::SharedFunctionInfoVerify(Isolate* isolate) {
   if (scope_info().length() > 0) {
     ScopeInfo info = scope_info();
     CHECK(kind() == info.function_kind());
-    CHECK_EQ(kind() == kModule, info.scope_type() == MODULE_SCOPE);
+    CHECK_EQ(internal::IsModule(kind()), info.scope_type() == MODULE_SCOPE);
   }
 
   if (IsApiFunction()) {
@@ -1140,8 +918,6 @@ void Oddball::OddballVerify(Isolate* isolate) {
   }
 }
 
-USE_TORQUE_VERIFIER(Cell)
-
 USE_TORQUE_VERIFIER(PropertyCell)
 
 void CodeDataContainer::CodeDataContainerVerify(Isolate* isolate) {
@@ -1158,7 +934,13 @@ void Code::CodeVerify(Isolate* isolate) {
   CHECK_LE(handler_table_offset(), constant_pool_offset());
   CHECK_LE(constant_pool_offset(), code_comments_offset());
   CHECK_LE(code_comments_offset(), InstructionSize());
-  CHECK(IsAligned(raw_instruction_start(), kCodeAlignment));
+  CHECK_IMPLIES(!ReadOnlyHeap::Contains(*this),
+                IsAligned(raw_instruction_start(), kCodeAlignment));
+  // TODO(delphick): Refactor Factory::CodeBuilder::BuildInternal, so that the
+  // following CHECK works builtin trampolines. It currently fails because
+  // CodeVerify is called halfway through constructing the trampoline and so not
+  // everything is set up.
+  // CHECK_EQ(ReadOnlyHeap::Contains(*this), !IsExecutable());
   relocation_info().ObjectVerify(isolate);
   CHECK(Code::SizeFor(body_size()) <= kMaxRegularHeapObjectSize ||
         isolate->heap()->InSpace(*this, CODE_LO_SPACE));
@@ -1185,10 +967,11 @@ void JSArray::JSArrayVerify(Isolate* isolate) {
     CHECK_EQ(elements(), ReadOnlyRoots(isolate).empty_fixed_array());
   }
   // Verify that the length and the elements backing store are in sync.
-  if (length().IsSmi() && (HasFastElements() || HasFrozenOrSealedElements())) {
+  if (length().IsSmi() &&
+      (HasFastElements() || HasAnyNonextensibleElements())) {
     if (elements().length() > 0) {
       CHECK_IMPLIES(HasDoubleElements(), elements().IsFixedDoubleArray());
-      CHECK_IMPLIES(HasSmiOrObjectElements() || HasFrozenOrSealedElements(),
+      CHECK_IMPLIES(HasSmiOrObjectElements() || HasAnyNonextensibleElements(),
                     elements().IsFixedArray());
     }
     int size = Smi::ToInt(length());
@@ -1215,8 +998,6 @@ void JSArray::JSArrayVerify(Isolate* isolate) {
   }
 }
 
-USE_TORQUE_VERIFIER(JSCollection)
-
 void JSSet::JSSetVerify(Isolate* isolate) {
   TorqueGeneratedClassVerifiers::JSSetVerify(*this, isolate);
   CHECK(table().IsOrderedHashSet() || table().IsUndefined(isolate));
@@ -1228,8 +1009,6 @@ void JSMap::JSMapVerify(Isolate* isolate) {
   CHECK(table().IsOrderedHashMap() || table().IsUndefined(isolate));
   // TODO(arv): Verify OrderedHashTable too.
 }
-
-USE_TORQUE_VERIFIER(JSCollectionIterator)
 
 void JSSetIterator::JSSetIteratorVerify(Isolate* isolate) {
   CHECK(IsJSSetIterator());
@@ -1328,35 +1107,15 @@ void JSStringIterator::JSStringIteratorVerify(Isolate* isolate) {
   CHECK_LE(index(), String::kMaxLength);
 }
 
-USE_TORQUE_VERIFIER(JSAsyncFromSyncIterator)
-
-USE_TORQUE_VERIFIER(JSWeakCollection)
-
 void JSWeakSet::JSWeakSetVerify(Isolate* isolate) {
   TorqueGeneratedClassVerifiers::JSWeakSetVerify(*this, isolate);
   CHECK(table().IsEphemeronHashTable() || table().IsUndefined(isolate));
 }
 
-USE_TORQUE_VERIFIER(Microtask)
-
 void CallableTask::CallableTaskVerify(Isolate* isolate) {
   TorqueGeneratedClassVerifiers::CallableTaskVerify(*this, isolate);
   CHECK(callable().IsCallable());
 }
-
-USE_TORQUE_VERIFIER(CallbackTask)
-
-USE_TORQUE_VERIFIER(PromiseReactionJobTask)
-
-USE_TORQUE_VERIFIER(PromiseFulfillReactionJobTask)
-
-USE_TORQUE_VERIFIER(PromiseRejectReactionJobTask)
-
-USE_TORQUE_VERIFIER(PromiseResolveThenableJobTask)
-
-USE_TORQUE_VERIFIER(PromiseCapability)
-
-USE_TORQUE_VERIFIER(PromiseReaction)
 
 void JSPromise::JSPromiseVerify(Isolate* isolate) {
   TorqueGeneratedClassVerifiers::JSPromiseVerify(*this, isolate);
@@ -1450,26 +1209,39 @@ void JSRegExp::JSRegExpVerify(Isolate* isolate) {
       break;
     }
     case JSRegExp::IRREGEXP: {
-      bool can_be_native = RegExp::CanGenerateNativeCode();
       bool can_be_interpreted = RegExp::CanGenerateBytecode();
 
       FixedArray arr = FixedArray::cast(data());
       Object one_byte_data = arr.get(JSRegExp::kIrregexpLatin1CodeIndex);
       // Smi : Not compiled yet (-1).
-      // Code/ByteArray: Compiled code.
+      // Code: Compiled irregexp code or trampoline to the interpreter.
       CHECK((one_byte_data.IsSmi() &&
              Smi::ToInt(one_byte_data) == JSRegExp::kUninitializedValue) ||
-            (can_be_interpreted && one_byte_data.IsByteArray()) ||
-            (can_be_native && one_byte_data.IsCode()));
+            one_byte_data.IsCode());
       Object uc16_data = arr.get(JSRegExp::kIrregexpUC16CodeIndex);
       CHECK((uc16_data.IsSmi() &&
              Smi::ToInt(uc16_data) == JSRegExp::kUninitializedValue) ||
-            (can_be_interpreted && uc16_data.IsByteArray()) ||
-            (can_be_native && uc16_data.IsCode()));
+            uc16_data.IsCode());
+
+      Object one_byte_bytecode =
+          arr.get(JSRegExp::kIrregexpLatin1BytecodeIndex);
+      // Smi : Not compiled yet (-1).
+      // ByteArray: Bytecode to interpret regexp.
+      CHECK((one_byte_bytecode.IsSmi() &&
+             Smi::ToInt(one_byte_bytecode) == JSRegExp::kUninitializedValue) ||
+            (can_be_interpreted && one_byte_bytecode.IsByteArray()));
+      Object uc16_bytecode = arr.get(JSRegExp::kIrregexpUC16BytecodeIndex);
+      CHECK((uc16_bytecode.IsSmi() &&
+             Smi::ToInt(uc16_bytecode) == JSRegExp::kUninitializedValue) ||
+            (can_be_interpreted && uc16_bytecode.IsByteArray()));
+
+      CHECK_IMPLIES(one_byte_data.IsSmi(), one_byte_bytecode.IsSmi());
+      CHECK_IMPLIES(uc16_data.IsSmi(), uc16_bytecode.IsSmi());
 
       CHECK(arr.get(JSRegExp::kIrregexpCaptureCountIndex).IsSmi());
       CHECK(arr.get(JSRegExp::kIrregexpMaxRegisterCountIndex).IsSmi());
-      CHECK(arr.get(JSRegExp::kIrregexpTierUpTicksIndex).IsSmi());
+      CHECK(arr.get(JSRegExp::kIrregexpTicksUntilTierUpIndex).IsSmi());
+      CHECK(arr.get(JSRegExp::kIrregexpBacktrackLimit).IsSmi());
       break;
     }
     default:
@@ -1478,8 +1250,6 @@ void JSRegExp::JSRegExpVerify(Isolate* isolate) {
       break;
   }
 }
-
-USE_TORQUE_VERIFIER(JSRegExpStringIterator)
 
 void JSProxy::JSProxyVerify(Isolate* isolate) {
   TorqueGeneratedClassVerifiers::JSProxyVerify(*this, isolate);
@@ -1532,13 +1302,11 @@ void AsyncGeneratorRequest::AsyncGeneratorRequestVerify(Isolate* isolate) {
   next().ObjectVerify(isolate);
 }
 
-void BigInt::BigIntVerify(Isolate* isolate) {
-  CHECK(IsBigInt());
+void BigIntBase::BigIntBaseVerify(Isolate* isolate) {
+  TorqueGeneratedClassVerifiers::BigIntBaseVerify(*this, isolate);
   CHECK_GE(length(), 0);
   CHECK_IMPLIES(is_zero(), !sign());  // There is no -0n.
 }
-
-USE_TORQUE_VERIFIER(JSModuleNamespace)
 
 void SourceTextModuleInfoEntry::SourceTextModuleInfoEntryVerify(
     Isolate* isolate) {
@@ -1567,10 +1335,18 @@ void Module::ModuleVerify(Isolate* isolate) {
 void SourceTextModule::SourceTextModuleVerify(Isolate* isolate) {
   TorqueGeneratedClassVerifiers::SourceTextModuleVerify(*this, isolate);
 
-  CHECK((status() >= kEvaluating && code().IsSourceTextModuleInfo()) ||
-        (status() == kInstantiated && code().IsJSGeneratorObject()) ||
-        (status() == kInstantiating && code().IsJSFunction()) ||
-        (code().IsSharedFunctionInfo()));
+  if (status() == kErrored) {
+    CHECK(code().IsSourceTextModuleInfo());
+  } else if (status() == kEvaluating || status() == kEvaluated) {
+    CHECK(code().IsJSGeneratorObject());
+  } else {
+    CHECK((status() == kInstantiated && code().IsJSGeneratorObject()) ||
+          (status() == kInstantiating && code().IsJSFunction()) ||
+          (status() == kPreInstantiating && code().IsSharedFunctionInfo()) ||
+          (status() == kUninstantiated && code().IsSharedFunctionInfo()));
+    CHECK(top_level_capability().IsUndefined() && !AsyncParentModuleCount() &&
+          !pending_async_dependencies() && !async_evaluating());
+  }
 
   CHECK_EQ(requested_modules().length(), info().module_requests().length());
 }
@@ -1624,8 +1400,6 @@ void PrototypeUsers::Verify(WeakArrayList array) {
   CHECK_EQ(weak_maps_count + empty_slots_count + 1, array.length());
 }
 
-USE_TORQUE_VERIFIER(TemplateObjectDescription)
-
 void EnumCache::EnumCacheVerify(Isolate* isolate) {
   TorqueGeneratedClassVerifiers::EnumCacheVerify(*this, isolate);
   Heap* heap = isolate->heap();
@@ -1635,8 +1409,6 @@ void EnumCache::EnumCacheVerify(Isolate* isolate) {
   }
 }
 
-USE_TORQUE_VERIFIER(ClassPositions)
-
 void ObjectBoilerplateDescription::ObjectBoilerplateDescriptionVerify(
     Isolate* isolate) {
   CHECK(IsObjectBoilerplateDescription());
@@ -1645,13 +1417,9 @@ void ObjectBoilerplateDescription::ObjectBoilerplateDescriptionVerify(
   this->FixedArrayVerify(isolate);
 }
 
-USE_TORQUE_VERIFIER(ArrayBoilerplateDescription)
-
 USE_TORQUE_VERIFIER(AsmWasmData)
 
 USE_TORQUE_VERIFIER(WasmDebugInfo)
-
-USE_TORQUE_VERIFIER(WasmExceptionTag)
 
 void WasmInstanceObject::WasmInstanceObjectVerify(Isolate* isolate) {
   JSObjectVerify(isolate);
@@ -1711,10 +1479,6 @@ void StoreHandler::StoreHandlerVerify(Isolate* isolate) {
 
 USE_TORQUE_VERIFIER(AccessorInfo)
 
-USE_TORQUE_VERIFIER(AccessorPair)
-
-USE_TORQUE_VERIFIER(AccessCheckInfo)
-
 void CallHandlerInfo::CallHandlerInfoVerify(Isolate* isolate) {
   TorqueGeneratedClassVerifiers::CallHandlerInfoVerify(*this, isolate);
   CHECK(map() == ReadOnlyRoots(isolate).side_effect_call_handler_info_map() ||
@@ -1724,28 +1488,18 @@ void CallHandlerInfo::CallHandlerInfoVerify(Isolate* isolate) {
                      .next_call_side_effect_free_call_handler_info_map());
 }
 
-USE_TORQUE_VERIFIER(InterceptorInfo)
-
-USE_TORQUE_VERIFIER(TemplateInfo)
-
-USE_TORQUE_VERIFIER(FunctionTemplateInfo)
-
-USE_TORQUE_VERIFIER(FunctionTemplateRareData)
-
 USE_TORQUE_VERIFIER(WasmCapiFunctionData)
 
 USE_TORQUE_VERIFIER(WasmJSFunctionData)
 
 USE_TORQUE_VERIFIER(WasmIndirectFunctionTable)
 
-USE_TORQUE_VERIFIER(ObjectTemplateInfo)
-
 void AllocationSite::AllocationSiteVerify(Isolate* isolate) {
   CHECK(IsAllocationSite());
   CHECK(dependent_code().IsDependentCode());
   CHECK(transition_info_or_boilerplate().IsSmi() ||
         transition_info_or_boilerplate().IsJSObject());
-  CHECK(nested_site().IsAllocationSite() || nested_site() == Smi::kZero);
+  CHECK(nested_site().IsAllocationSite() || nested_site() == Smi::zero());
 }
 
 USE_TORQUE_VERIFIER(AllocationMemento)
@@ -1777,10 +1531,6 @@ void NormalizedMapCache::NormalizedMapCacheVerify(Isolate* isolate) {
   }
 }
 
-USE_TORQUE_VERIFIER(DebugInfo)
-
-USE_TORQUE_VERIFIER(StackTraceFrame)
-
 USE_TORQUE_VERIFIER(StackFrameInfo)
 
 void PreparseData::PreparseDataVerify(Isolate* isolate) {
@@ -1793,19 +1543,6 @@ void PreparseData::PreparseDataVerify(Isolate* isolate) {
     CHECK(child.IsNull() || child.IsPreparseData());
     VerifyPointer(isolate, child);
   }
-}
-
-void UncompiledDataWithPreparseData::UncompiledDataWithPreparseDataVerify(
-    Isolate* isolate) {
-  CHECK(IsUncompiledDataWithPreparseData());
-  VerifyPointer(isolate, inferred_name());
-  VerifyPointer(isolate, preparse_data());
-}
-
-void UncompiledDataWithoutPreparseData::UncompiledDataWithoutPreparseDataVerify(
-    Isolate* isolate) {
-  CHECK(IsUncompiledDataWithoutPreparseData());
-  VerifyPointer(isolate, inferred_name());
 }
 
 USE_TORQUE_VERIFIER(InterpreterData)
@@ -1866,9 +1603,11 @@ void JSObject::IncrementSpillStatistics(Isolate* isolate,
     case HOLEY_ELEMENTS:
     case HOLEY_FROZEN_ELEMENTS:
     case HOLEY_SEALED_ELEMENTS:
+    case HOLEY_NONEXTENSIBLE_ELEMENTS:
     case PACKED_ELEMENTS:
     case PACKED_FROZEN_ELEMENTS:
     case PACKED_SEALED_ELEMENTS:
+    case PACKED_NONEXTENSIBLE_ELEMENTS:
     case FAST_STRING_WRAPPER_ELEMENTS: {
       info->number_of_objects_with_fast_elements_++;
       int holes = 0;

@@ -34,6 +34,9 @@ namespace internal {
  *
  * Each call to a public method should retain this convention.
  * The stack will have the following structure:
+ *       - Address regexp       (address of the JSRegExp object; unused in
+ *                               native code, passed to match signature of
+ *                               the interpreter)
  *       - Isolate* isolate     (address of the current isolate)
  *       - direct_call          (if 1, direct call from JavaScript code, if 0
  *                               call through the runtime system)
@@ -73,7 +76,8 @@ namespace internal {
  *              int num_capture_registers,
  *              byte* stack_area_base,
  *              bool direct_call = false,
- *              Isolate* isolate);
+ *              Isolate* isolate
+ *              Address regexp);
  */
 
 #define __ ACCESS_MASM(masm_)
@@ -138,6 +142,17 @@ void RegExpMacroAssemblerIA32::AdvanceRegister(int reg, int by) {
 
 void RegExpMacroAssemblerIA32::Backtrack() {
   CheckPreemption();
+  if (has_backtrack_limit()) {
+    Label next;
+    __ inc(Operand(ebp, kBacktrackCount));
+    __ cmp(Operand(ebp, kBacktrackCount), Immediate(backtrack_limit()));
+    __ j(not_equal, &next);
+
+    // Exceeded limits are treated as a failed match.
+    Fail();
+
+    __ bind(&next);
+  }
   // Pop Code offset from backtrack stack, add Code and jump to location.
   Pop(ebx);
   __ add(ebx, Immediate(masm_->CodeObject()));
@@ -161,13 +176,11 @@ void RegExpMacroAssemblerIA32::CheckCharacterGT(uc16 limit, Label* on_greater) {
   BranchOrBacktrack(greater, on_greater);
 }
 
-
-void RegExpMacroAssemblerIA32::CheckAtStart(Label* on_at_start) {
-  __ lea(eax, Operand(edi, -char_size()));
+void RegExpMacroAssemblerIA32::CheckAtStart(int cp_offset, Label* on_at_start) {
+  __ lea(eax, Operand(edi, -char_size() + cp_offset * char_size()));
   __ cmp(eax, Operand(ebp, kStringStartMinusOne));
   BranchOrBacktrack(equal, on_at_start);
 }
-
 
 void RegExpMacroAssemblerIA32::CheckNotAtStart(int cp_offset,
                                                Label* on_not_at_start) {
@@ -676,15 +689,21 @@ Handle<HeapObject> RegExpMacroAssemblerIA32::GetCode(Handle<String> source) {
   __ push(esi);
   __ push(edi);
   __ push(ebx);  // Callee-save on MacOS.
+
+  STATIC_ASSERT(kSuccessfulCaptures == kBackup_ebx - kSystemPointerSize);
   __ push(Immediate(0));  // Number of successful matches in a global regexp.
+  STATIC_ASSERT(kStringStartMinusOne ==
+                kSuccessfulCaptures - kSystemPointerSize);
   __ push(Immediate(0));  // Make room for "string start - 1" constant.
+  STATIC_ASSERT(kBacktrackCount == kStringStartMinusOne - kSystemPointerSize);
+  __ push(Immediate(0));  // The backtrack counter.
 
   // Check if we have space on the stack for registers.
   Label stack_limit_hit;
   Label stack_ok;
 
   ExternalReference stack_limit =
-      ExternalReference::address_of_stack_limit(isolate());
+      ExternalReference::address_of_jslimit(isolate());
   __ mov(ecx, esp);
   __ sub(ecx, StaticVariable(stack_limit));
   // Handle it if the stack pointer is already below the stack limit.
@@ -1218,7 +1237,7 @@ void RegExpMacroAssemblerIA32::CheckPreemption() {
   // Check for preemption.
   Label no_preempt;
   ExternalReference stack_limit =
-      ExternalReference::address_of_stack_limit(isolate());
+      ExternalReference::address_of_jslimit(isolate());
   __ cmp(esp, StaticVariable(stack_limit));
   __ j(above, &no_preempt);
 
@@ -1231,7 +1250,7 @@ void RegExpMacroAssemblerIA32::CheckPreemption() {
 void RegExpMacroAssemblerIA32::CheckStackLimit() {
   Label no_stack_overflow;
   ExternalReference stack_limit =
-      ExternalReference::address_of_regexp_stack_limit(isolate());
+      ExternalReference::address_of_regexp_stack_limit_address(isolate());
   __ cmp(backtrack_stackpointer(), StaticVariable(stack_limit));
   __ j(above, &no_stack_overflow);
 

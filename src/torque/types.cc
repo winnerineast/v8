@@ -4,9 +4,9 @@
 
 #include <iostream>
 
-#include "src/common/globals.h"
 #include "src/torque/ast.h"
 #include "src/torque/declarable.h"
+#include "src/torque/global-context.h"
 #include "src/torque/type-oracle.h"
 #include "src/torque/type-visitor.h"
 #include "src/torque/types.h"
@@ -15,8 +15,22 @@ namespace v8 {
 namespace internal {
 namespace torque {
 
+// This custom copy constructor doesn't copy aliases_ and id_ because they
+// should be distinct for each type.
+Type::Type(const Type& other) V8_NOEXCEPT : TypeBase(other),
+                                            parent_(other.parent_),
+                                            aliases_(),
+                                            id_(TypeOracle::FreshTypeId()) {}
+Type::Type(TypeBase::Kind kind, const Type* parent,
+           MaybeSpecializationKey specialized_from)
+    : TypeBase(kind),
+      parent_(parent),
+      id_(TypeOracle::FreshTypeId()),
+      specialized_from_(specialized_from) {}
+
 std::string Type::ToString() const {
-  if (aliases_.size() == 0) return ToExplicitString();
+  if (aliases_.size() == 0)
+    return ComputeName(ToExplicitString(), GetSpecializedFrom());
   if (aliases_.size() == 1) return *aliases_.begin();
   std::stringstream result;
   int i = 0;
@@ -32,6 +46,20 @@ std::string Type::ToString() const {
   }
   result << ")";
   return result.str();
+}
+
+std::string Type::SimpleName() const {
+  if (aliases_.empty()) {
+    std::stringstream result;
+    result << SimpleNameImpl();
+    if (GetSpecializedFrom()) {
+      for (const Type* t : GetSpecializedFrom()->specialized_types) {
+        result << "_" << t->SimpleName();
+      }
+    }
+    return result.str();
+  }
+  return *aliases_.begin();
 }
 
 bool Type::IsSubtypeOf(const Type* supertype) const {
@@ -50,7 +78,9 @@ bool Type::IsSubtypeOf(const Type* supertype) const {
 
 base::Optional<const ClassType*> Type::ClassSupertype() const {
   for (const Type* t = this; t != nullptr; t = t->parent()) {
-    if (auto* class_type = ClassType::DynamicCast(t)) return class_type;
+    if (auto* class_type = ClassType::DynamicCast(t)) {
+      return class_type;
+    }
   }
   return base::nullopt;
 }
@@ -86,7 +116,7 @@ bool Type::IsAbstractName(const std::string& name) const {
 
 std::string Type::GetGeneratedTypeName() const {
   std::string result = GetGeneratedTypeNameImpl();
-  if (result.empty() || result == "compiler::TNode<>") {
+  if (result.empty() || result == "TNode<>") {
     ReportError("Generated type is required for type '", ToString(),
                 "'. Use 'generates' clause in definition.");
   }
@@ -106,6 +136,23 @@ std::string AbstractType::GetGeneratedTNodeTypeNameImpl() const {
   return generated_type_;
 }
 
+std::vector<RuntimeType> AbstractType::GetRuntimeTypes() const {
+  std::string type_name = GetGeneratedTNodeTypeName();
+  if (auto strong_type =
+          Type::MatchUnaryGeneric(this, TypeOracle::GetWeakGeneric())) {
+    auto strong_runtime_types = (*strong_type)->GetRuntimeTypes();
+    std::vector<RuntimeType> result;
+    for (const RuntimeType& type : strong_runtime_types) {
+      // Generic parameter in Weak<T> should have already been checked to
+      // extend HeapObject, so it couldn't itself be another weak type.
+      DCHECK(type.weak_ref_to.empty());
+      result.push_back({type_name, type.type});
+    }
+    return result;
+  }
+  return {{type_name, ""}};
+}
+
 std::string BuiltinPointerType::ToExplicitString() const {
   std::stringstream result;
   result << "builtin (";
@@ -114,15 +161,13 @@ std::string BuiltinPointerType::ToExplicitString() const {
   return result.str();
 }
 
-std::string BuiltinPointerType::MangledName() const {
+std::string BuiltinPointerType::SimpleNameImpl() const {
   std::stringstream result;
-  result << "FT";
+  result << "BuiltinPointer";
   for (const Type* t : parameter_types_) {
-    std::string arg_type_string = t->MangledName();
-    result << arg_type_string.size() << arg_type_string;
+    result << "_" << t->SimpleName();
   }
-  std::string return_type_string = return_type_->MangledName();
-  result << return_type_string.size() << return_type_string;
+  result << "_" << return_type_->SimpleName();
   return result.str();
 }
 
@@ -141,12 +186,15 @@ std::string UnionType::ToExplicitString() const {
   return result.str();
 }
 
-std::string UnionType::MangledName() const {
+std::string UnionType::SimpleNameImpl() const {
   std::stringstream result;
-  result << "UT";
+  bool first = true;
   for (const Type* t : types_) {
-    std::string arg_type_string = t->MangledName();
-    result << arg_type_string.size() << arg_type_string;
+    if (!first) {
+      result << "_OR_";
+    }
+    first = false;
+    result << t->SimpleName();
   }
   return result.str();
 }
@@ -263,7 +311,7 @@ const Field& AggregateType::LookupFieldInternal(const std::string& name) const {
       return parent_class->LookupField(name);
     }
   }
-  ReportError("no field ", name, " found");
+  ReportError("no field ", name, " found in ", this->ToString());
 }
 
 const Field& AggregateType::LookupField(const std::string& name) const {
@@ -271,14 +319,26 @@ const Field& AggregateType::LookupField(const std::string& name) const {
   return LookupFieldInternal(name);
 }
 
+StructType::StructType(Namespace* nspace, const StructDeclaration* decl,
+                       MaybeSpecializationKey specialized_from)
+    : AggregateType(Kind::kStructType, nullptr, nspace, decl->name->value,
+                    specialized_from),
+      decl_(decl) {
+  if (decl->flags & StructFlag::kExport) {
+    generated_type_name_ = "TorqueStruct" + name();
+  } else {
+    generated_type_name_ =
+        GlobalContext::MakeUniqueName("TorqueStruct" + SimpleName());
+  }
+}
+
 std::string StructType::GetGeneratedTypeNameImpl() const {
-  return "TorqueStruct" + MangledName();
+  return generated_type_name_;
 }
 
 // static
-std::string StructType::ComputeName(
-    const std::string& basename,
-    StructType::MaybeSpecializationKey specialized_from) {
+std::string Type::ComputeName(const std::string& basename,
+                              MaybeSpecializationKey specialized_from) {
   if (!specialized_from) return basename;
   std::stringstream s;
   s << basename << "<";
@@ -294,37 +354,16 @@ std::string StructType::ComputeName(
   return s.str();
 }
 
-std::string StructType::MangledName() const {
-  std::stringstream result;
-  // TODO(gsps): Add 'ST' as a prefix once we can control the generated type
-  // name from Torque code
-  result << basename_;
-  if (specialized_from_) {
-    for (const Type* t : specialized_from_->specialized_types) {
-      std::string arg_type_string = t->MangledName();
-      result << arg_type_string.size() << arg_type_string;
-    }
-  }
-  return result.str();
-}
+std::string StructType::SimpleNameImpl() const { return decl_->name->value; }
 
 // static
-base::Optional<const Type*> StructType::MatchUnaryGeneric(
-    const Type* type, GenericStructType* generic) {
-  if (auto* struct_type = StructType::DynamicCast(type)) {
-    return MatchUnaryGeneric(struct_type, generic);
-  }
-  return base::nullopt;
-}
-
-// static
-base::Optional<const Type*> StructType::MatchUnaryGeneric(
-    const StructType* type, GenericStructType* generic) {
+base::Optional<const Type*> Type::MatchUnaryGeneric(const Type* type,
+                                                    GenericType* generic) {
   DCHECK_EQ(generic->generic_parameters().size(), 1);
-  if (!type->specialized_from_) {
+  if (!type->GetSpecializedFrom()) {
     return base::nullopt;
   }
-  auto& key = type->specialized_from_.value();
+  auto& key = type->GetSpecializedFrom().value();
   if (key.generic != generic || key.specialized_types.size() != 1) {
     return base::nullopt;
   }
@@ -343,6 +382,17 @@ std::string StructType::ToExplicitString() const {
   std::stringstream result;
   result << "struct " << name();
   return result.str();
+}
+
+void StructType::Finalize() const {
+  if (is_finalized_) return;
+  {
+    CurrentScope::Scope scope_activator(nspace());
+    CurrentSourcePosition::Scope position_activator(decl_->pos);
+    TypeVisitor::VisitStructMethods(const_cast<StructType*>(this), decl_);
+  }
+  is_finalized_ = true;
+  CheckForDuplicateFields();
 }
 
 constexpr ClassFlags ClassType::kInternalFlags;
@@ -371,7 +421,7 @@ std::string ClassType::GetGeneratedTNodeTypeNameImpl() const {
 
 std::string ClassType::GetGeneratedTypeNameImpl() const {
   return IsConstexpr() ? GetGeneratedTNodeTypeName()
-                       : "compiler::TNode<" + GetGeneratedTNodeTypeName() + ">";
+                       : "TNode<" + GetGeneratedTNodeTypeName() + ">";
 }
 
 std::string ClassType::ToExplicitString() const {
@@ -393,11 +443,11 @@ void ClassType::Finalize() const {
     if (const ClassType* super_class = ClassType::DynamicCast(parent())) {
       if (super_class->HasIndexedField()) flags_ |= ClassFlag::kHasIndexedField;
       if (!super_class->IsAbstract() && !HasSameInstanceTypeAsParent()) {
-        Error(
-            "Super class must either be abstract (annotate super class with "
-            "@abstract) "
-            "or this class must have the same instance type as the super class "
-            "(annotate this class with @hasSameInstanceTypeAsParent).")
+        Error("Super class must either be abstract (annotate super class with ",
+              ANNOTATION_ABSTRACT,
+              ") or this class must have the same instance type as the super "
+              "class (annotate this class with ",
+              ANNOTATION_HAS_SAME_INSTANCE_TYPE_AS_PARENT, ").")
             .Position(this->decl_->name->pos);
       }
     }
@@ -576,9 +626,7 @@ bool IsAssignableFrom(const Type* to, const Type* from) {
   return TypeOracle::IsImplicitlyConvertableFrom(to, from);
 }
 
-bool operator<(const Type& a, const Type& b) {
-  return a.MangledName() < b.MangledName();
-}
+bool operator<(const Type& a, const Type& b) { return a.id() < b.id(); }
 
 VisitResult ProjectStructField(VisitResult structure,
                                const std::string& fieldname) {
@@ -651,10 +699,10 @@ std::tuple<size_t, std::string> Field::GetFieldSizeInformation() const {
   const Type* field_type = this->name_and_type.type;
   size_t field_size = 0;
   if (field_type->IsSubtypeOf(TypeOracle::GetTaggedType())) {
-    field_size = kTaggedSize;
+    field_size = TargetArchitecture::TaggedSize();
     size_string = "kTaggedSize";
   } else if (field_type->IsSubtypeOf(TypeOracle::GetRawPtrType())) {
-    field_size = kSystemPointerSize;
+    field_size = TargetArchitecture::RawPtrSize();
     size_string = "kSystemPointerSize";
   } else if (field_type->IsSubtypeOf(TypeOracle::GetVoidType())) {
     field_size = 0;
@@ -681,10 +729,10 @@ std::tuple<size_t, std::string> Field::GetFieldSizeInformation() const {
     field_size = kDoubleSize;
     size_string = "kDoubleSize";
   } else if (field_type->IsSubtypeOf(TypeOracle::GetIntPtrType())) {
-    field_size = kIntptrSize;
+    field_size = TargetArchitecture::RawPtrSize();
     size_string = "kIntptrSize";
   } else if (field_type->IsSubtypeOf(TypeOracle::GetUIntPtrType())) {
-    field_size = kIntptrSize;
+    field_size = TargetArchitecture::RawPtrSize();
     size_string = "kIntptrSize";
   } else {
     ReportError("fields of type ", *field_type, " are not (yet) supported");

@@ -24,7 +24,7 @@ class V8_EXPORT_PRIVATE RegExpMacroAssemblerX64
   void AdvanceRegister(int reg, int by) override;
   void Backtrack() override;
   void Bind(Label* label) override;
-  void CheckAtStart(Label* on_at_start) override;
+  void CheckAtStart(int cp_offset, Label* on_at_start) override;
   void CheckCharacter(uint32_t c, Label* on_equal) override;
   void CheckCharacterAfterAnd(uint32_t c, uint32_t mask,
                               Label* on_equal) override;
@@ -92,7 +92,7 @@ class V8_EXPORT_PRIVATE RegExpMacroAssemblerX64
   static const int kReturn_eip = kFramePointer + kSystemPointerSize;
   static const int kFrameAlign = kReturn_eip + kSystemPointerSize;
 
-#ifdef _WIN64
+#ifdef V8_TARGET_OS_WIN
   // Parameters (first four passed as registers, but with room on stack).
   // In Microsoft 64-bit Calling Convention, there is room on the callers
   // stack (before the return address) to spill parameter registers. We
@@ -131,7 +131,7 @@ class V8_EXPORT_PRIVATE RegExpMacroAssemblerX64
   static const int kIsolate = kDirectCall + kSystemPointerSize;
 #endif
 
-#ifdef _WIN64
+#ifdef V8_TARGET_OS_WIN
   // Microsoft calling convention has three callee-saved registers
   // (that we are using). We push these after the frame pointer.
   static const int kBackup_rsi = kFramePointer - kSystemPointerSize;
@@ -146,15 +146,16 @@ class V8_EXPORT_PRIVATE RegExpMacroAssemblerX64
   static const int kLastCalleeSaveRegister = kBackup_rbx;
 #endif
 
-  static const int kSuccessfulCaptures =
-      kLastCalleeSaveRegister - kSystemPointerSize;
   // When adding local variables remember to push space for them in
   // the frame in GetCode.
+  static const int kSuccessfulCaptures =
+      kLastCalleeSaveRegister - kSystemPointerSize;
   static const int kStringStartMinusOne =
       kSuccessfulCaptures - kSystemPointerSize;
+  static const int kBacktrackCount = kStringStartMinusOne - kSystemPointerSize;
 
   // First register address. Following registers are below it on the stack.
-  static const int kRegisterZero = kStringStartMinusOne - kSystemPointerSize;
+  static const int kRegisterZero = kBacktrackCount - kSystemPointerSize;
 
   // Initial size of code buffer.
   static const int kRegExpCodeSize = 1024;

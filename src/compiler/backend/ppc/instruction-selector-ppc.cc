@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/base/adapters.h"
+#include "src/base/iterator.h"
 #include "src/compiler/backend/instruction-selector-impl.h"
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/node-properties.h"
@@ -64,17 +64,6 @@ class PPCOperandGenerator final : public OperandGenerator {
         return false;
     }
     return false;
-  }
-
-  // Use the stack pointer if the node is LoadStackPointer, otherwise assign a
-  // register.
-  InstructionOperand UseRegisterOrStackPointer(Node* node) {
-    if (node->opcode() == IrOpcode::kLoadStackPointer) {
-      return LocationOperand(LocationOperand::EXPLICIT,
-                             LocationOperand::REGISTER,
-                             MachineRepresentation::kWord32, sp.code());
-    }
-    return UseRegister(node);
   }
 };
 
@@ -209,7 +198,6 @@ void InstructionSelector::VisitLoad(Node* node) {
       opcode = kPPC_LoadWord64;
       mode = kInt16Imm_4ByteAligned;
       break;
-    case MachineRepresentation::kCompressedSigned:   // Fall through.
     case MachineRepresentation::kCompressedPointer:  // Fall through.
     case MachineRepresentation::kCompressed:         // Fall through.
     case MachineRepresentation::kSimd128:  // Fall through.
@@ -333,7 +321,6 @@ void InstructionSelector::VisitStore(Node* node) {
 #else
       case MachineRepresentation::kWord64:  // Fall through.
 #endif
-      case MachineRepresentation::kCompressedSigned:   // Fall through.
       case MachineRepresentation::kCompressedPointer:  // Fall through.
       case MachineRepresentation::kCompressed:         // Fall through.
       case MachineRepresentation::kSimd128:  // Fall through.
@@ -557,6 +544,35 @@ void InstructionSelector::VisitWord32Xor(Node* node) {
   } else {
     VisitBinop<Int32BinopMatcher>(this, node, kPPC_Xor, kInt16Imm_Unsigned);
   }
+}
+
+void InstructionSelector::VisitStackPointerGreaterThan(
+    Node* node, FlagsContinuation* cont) {
+  StackCheckKind kind = StackCheckKindOf(node->op());
+  InstructionCode opcode =
+      kArchStackPointerGreaterThan | MiscField::encode(static_cast<int>(kind));
+
+  PPCOperandGenerator g(this);
+
+  // No outputs.
+  InstructionOperand* const outputs = nullptr;
+  const int output_count = 0;
+
+  // Applying an offset to this stack check requires a temp register. Offsets
+  // are only applied to the first stack check. If applying an offset, we must
+  // ensure the input and temp registers do not alias, thus kUniqueRegister.
+  InstructionOperand temps[] = {g.TempRegister()};
+  const int temp_count = (kind == StackCheckKind::kJSFunctionEntry) ? 1 : 0;
+  const auto register_mode = (kind == StackCheckKind::kJSFunctionEntry)
+                                 ? OperandGenerator::kUniqueRegister
+                                 : OperandGenerator::kRegister;
+
+  Node* const value = node->InputAt(0);
+  InstructionOperand inputs[] = {g.UseRegisterWithMode(value, register_mode)};
+  static constexpr int input_count = arraysize(inputs);
+
+  EmitWithContinuation(opcode, output_count, outputs, input_count, inputs,
+                       temp_count, temps, cont);
 }
 
 #if V8_TARGET_ARCH_PPC64
@@ -928,6 +944,12 @@ void InstructionSelector::VisitWord32ReverseBytes(Node* node) {
        g.UseRegister(node->InputAt(0)));
 }
 
+void InstructionSelector::VisitSimd128ReverseBytes(Node* node) {
+  // TODO(miladfar): Implement the ppc selector for reversing SIMD bytes.
+  // Check if the input node is a Load and do a Load Reverse at once.
+  UNIMPLEMENTED();
+}
+
 void InstructionSelector::VisitInt32Add(Node* node) {
   VisitBinop<Int32BinopMatcher>(this, node, kPPC_Add32, kInt16Imm);
 }
@@ -1141,30 +1163,6 @@ void InstructionSelector::VisitChangeUint32ToUint64(Node* node) {
 }
 
 void InstructionSelector::VisitChangeTaggedToCompressed(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitChangeTaggedPointerToCompressedPointer(
-    Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitChangeTaggedSignedToCompressedSigned(
-    Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitChangeCompressedToTagged(Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitChangeCompressedPointerToTaggedPointer(
-    Node* node) {
-  UNIMPLEMENTED();
-}
-
-void InstructionSelector::VisitChangeCompressedSignedToTaggedSigned(
-    Node* node) {
   UNIMPLEMENTED();
 }
 
@@ -1457,15 +1455,15 @@ void VisitWordCompare(InstructionSelector* selector, Node* node,
 
   // Match immediates on left or right side of comparison.
   if (g.CanBeImmediate(right, immediate_mode)) {
-    VisitCompare(selector, opcode, g.UseRegisterOrStackPointer(left),
-                 g.UseImmediate(right), cont);
+    VisitCompare(selector, opcode, g.UseRegister(left), g.UseImmediate(right),
+                 cont);
   } else if (g.CanBeImmediate(left, immediate_mode)) {
     if (!commutative) cont->Commute();
-    VisitCompare(selector, opcode, g.UseRegisterOrStackPointer(right),
-                 g.UseImmediate(left), cont);
+    VisitCompare(selector, opcode, g.UseRegister(right), g.UseImmediate(left),
+                 cont);
   } else {
-    VisitCompare(selector, opcode, g.UseRegisterOrStackPointer(left),
-                 g.UseRegisterOrStackPointer(right), cont);
+    VisitCompare(selector, opcode, g.UseRegister(left), g.UseRegister(right),
+                 cont);
   }
 }
 
@@ -1640,6 +1638,9 @@ void InstructionSelector::VisitWordCompareZero(Node* user, Node* value,
 // case IrOpcode::kWord64Shr:
 // case IrOpcode::kWord64Ror:
 #endif
+      case IrOpcode::kStackPointerGreaterThan:
+        cont->OverwriteAndNegateIfEqual(kStackPointerGreaterThanCondition);
+        return VisitStackPointerGreaterThan(value, cont);
       default:
         break;
     }
@@ -2282,6 +2283,10 @@ void InstructionSelector::VisitF32x4Sub(Node* node) { UNIMPLEMENTED(); }
 
 void InstructionSelector::VisitF32x4Mul(Node* node) { UNIMPLEMENTED(); }
 
+void InstructionSelector::VisitF32x4Sqrt(Node* node) { UNIMPLEMENTED(); }
+
+void InstructionSelector::VisitF32x4Div(Node* node) { UNIMPLEMENTED(); }
+
 void InstructionSelector::VisitF32x4Min(Node* node) { UNIMPLEMENTED(); }
 
 void InstructionSelector::VisitF32x4Max(Node* node) { UNIMPLEMENTED(); }
@@ -2386,6 +2391,36 @@ void InstructionSelector::VisitI8x16ShrU(Node* node) { UNIMPLEMENTED(); }
 void InstructionSelector::VisitI8x16Mul(Node* node) { UNIMPLEMENTED(); }
 
 void InstructionSelector::VisitS8x16Shuffle(Node* node) { UNIMPLEMENTED(); }
+
+void InstructionSelector::VisitS8x16Swizzle(Node* node) { UNIMPLEMENTED(); }
+
+void InstructionSelector::VisitF64x2Splat(Node* node) { UNIMPLEMENTED(); }
+
+void InstructionSelector::VisitF64x2ExtractLane(Node* node) { UNIMPLEMENTED(); }
+
+void InstructionSelector::VisitF64x2ReplaceLane(Node* node) { UNIMPLEMENTED(); }
+
+void InstructionSelector::VisitF64x2Abs(Node* node) { UNIMPLEMENTED(); }
+
+void InstructionSelector::VisitF64x2Neg(Node* node) { UNIMPLEMENTED(); }
+
+void InstructionSelector::VisitF64x2Sqrt(Node* node) { UNIMPLEMENTED(); }
+
+void InstructionSelector::VisitF64x2Add(Node* node) { UNIMPLEMENTED(); }
+
+void InstructionSelector::VisitF64x2Sub(Node* node) { UNIMPLEMENTED(); }
+
+void InstructionSelector::VisitF64x2Mul(Node* node) { UNIMPLEMENTED(); }
+
+void InstructionSelector::VisitF64x2Div(Node* node) { UNIMPLEMENTED(); }
+
+void InstructionSelector::VisitF64x2Eq(Node* node) { UNIMPLEMENTED(); }
+
+void InstructionSelector::VisitF64x2Ne(Node* node) { UNIMPLEMENTED(); }
+
+void InstructionSelector::VisitF64x2Lt(Node* node) { UNIMPLEMENTED(); }
+
+void InstructionSelector::VisitF64x2Le(Node* node) { UNIMPLEMENTED(); }
 
 // static
 MachineOperatorBuilder::Flags

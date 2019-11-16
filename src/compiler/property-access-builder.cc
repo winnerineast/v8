@@ -61,7 +61,7 @@ bool PropertyAccessBuilder::TryBuildStringCheck(
     // Monormorphic string access (ignoring the fact that there are multiple
     // String maps).
     *receiver = *effect =
-        graph()->NewNode(simplified()->CheckString(VectorSlotPair()), *receiver,
+        graph()->NewNode(simplified()->CheckString(FeedbackSource()), *receiver,
                          *effect, control);
     return true;
   }
@@ -74,7 +74,7 @@ bool PropertyAccessBuilder::TryBuildNumberCheck(
   if (HasOnlyNumberMaps(broker, maps)) {
     // Monomorphic number access (we also deal with Smis here).
     *receiver = *effect =
-        graph()->NewNode(simplified()->CheckNumber(VectorSlotPair()), *receiver,
+        graph()->NewNode(simplified()->CheckNumber(FeedbackSource()), *receiver,
                          *effect, control);
     return true;
   }
@@ -136,13 +136,13 @@ MachineRepresentation PropertyAccessBuilder::ConvertRepresentation(
     Representation representation) {
   switch (representation.kind()) {
     case Representation::kSmi:
-      return MachineType::RepCompressedTaggedSigned();
+      return MachineRepresentation::kTaggedSigned;
     case Representation::kDouble:
       return MachineRepresentation::kFloat64;
     case Representation::kHeapObject:
-      return MachineType::RepCompressedTaggedPointer();
+      return MachineRepresentation::kTaggedPointer;
     case Representation::kTagged:
-      return MachineType::RepCompressedTagged();
+      return MachineRepresentation::kTagged;
     default:
       UNREACHABLE();
   }
@@ -199,12 +199,10 @@ Node* PropertyAccessBuilder::BuildLoadDataField(
   Node* storage = ResolveHolder(access_info, receiver);
   if (!field_index.is_inobject()) {
     storage = *effect = graph()->NewNode(
-        simplified()->LoadField(AccessBuilder::ForJSObjectPropertiesOrHash()),
+        simplified()->LoadField(
+            AccessBuilder::ForJSObjectPropertiesOrHashKnownPointer()),
         storage, *effect, *control);
   }
-  PropertyConstness constness = access_info.IsDataConstant()
-                                    ? PropertyConstness::kConst
-                                    : PropertyConstness::kMutable;
   FieldAccess field_access = {
       kTaggedBase,
       field_index.offset(),
@@ -214,19 +212,18 @@ Node* PropertyAccessBuilder::BuildLoadDataField(
       MachineType::TypeForRepresentation(field_representation),
       kFullWriteBarrier,
       LoadSensitivity::kCritical,
-      constness};
+      access_info.GetConstFieldInfo()};
   if (field_representation == MachineRepresentation::kFloat64) {
     if (!field_index.is_inobject() || !FLAG_unbox_double_fields) {
-      FieldAccess const storage_access = {
-          kTaggedBase,
-          field_index.offset(),
-          name.object(),
-          MaybeHandle<Map>(),
-          Type::OtherInternal(),
-          MachineType::TypeCompressedTaggedPointer(),
-          kPointerWriteBarrier,
-          LoadSensitivity::kCritical,
-          constness};
+      FieldAccess const storage_access = {kTaggedBase,
+                                          field_index.offset(),
+                                          name.object(),
+                                          MaybeHandle<Map>(),
+                                          Type::OtherInternal(),
+                                          MachineType::TaggedPointer(),
+                                          kPointerWriteBarrier,
+                                          LoadSensitivity::kCritical,
+                                          access_info.GetConstFieldInfo()};
       storage = *effect = graph()->NewNode(
           simplified()->LoadField(storage_access), storage, *effect, *control);
       field_access.offset = HeapNumber::kValueOffset;

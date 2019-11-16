@@ -8,6 +8,7 @@
 #include <sstream>
 
 #include "src/base/bits.h"
+#include "src/codegen/interface-descriptors.h"
 #include "src/codegen/macro-assembler.h"
 #include "src/codegen/register-configuration.h"
 #include "src/codegen/safepoint-table.h"
@@ -270,6 +271,7 @@ SafeStackFrameIterator::SafeStackFrameIterator(Isolate* isolate, Address pc,
       low_bound_(sp),
       high_bound_(js_entry_sp),
       top_frame_type_(StackFrame::NONE),
+      top_context_address_(kNullAddress),
       external_callback_scope_(isolate->external_callback_scope()),
       top_link_register_(lr) {
   StackFrame::State state;
@@ -342,6 +344,13 @@ SafeStackFrameIterator::SafeStackFrameIterator(Isolate* isolate, Address pc,
       if (type != StackFrame::INTERPRETED) {
         advance_frame = true;
       }
+      MSAN_MEMORY_IS_INITIALIZED(
+          fp + CommonFrameConstants::kContextOrFrameTypeOffset,
+          kSystemPointerSize);
+      Address type_or_context_address =
+          Memory<Address>(fp + CommonFrameConstants::kContextOrFrameTypeOffset);
+      if (!StackFrame::IsTypeMarker(type_or_context_address))
+        top_context_address_ = type_or_context_address;
     } else {
       // Mark the frame as OPTIMIZED if we cannot determine its type.
       // We chose OPTIMIZED rather than INTERPRETED because it's closer to
@@ -480,7 +489,8 @@ Code StackFrame::LookupCode() const {
 void StackFrame::IteratePc(RootVisitor* v, Address* pc_address,
                            Address* constant_pool_address, Code holder) {
   Address pc = *pc_address;
-  DCHECK(holder.GetHeap()->GcSafeCodeContains(holder, pc));
+  DCHECK(ReadOnlyHeap::Contains(holder) ||
+         holder.GetHeap()->GcSafeCodeContains(holder, pc));
   unsigned pc_offset = static_cast<unsigned>(pc - holder.InstructionStart());
   Object code = holder;
   v->VisitRootPointer(Root::kTop, nullptr, FullObjectSlot(&code));
@@ -544,14 +554,6 @@ StackFrame::Type StackFrame::ComputeType(const StackFrameIteratorBase* iterator,
           return WASM_EXIT;
         case wasm::WasmCode::kWasmToJsWrapper:
           return WASM_TO_JS;
-        case wasm::WasmCode::kRuntimeStub:
-          // Some stubs, like e.g. {WasmCode::kWasmCompileLazy} build their own
-          // specialized frame which already carries a type marker.
-          // TODO(mstarzinger): This is only needed for the case where embedded
-          // builtins are disabled. It can be removed once all non-embedded
-          // builtins are gone.
-          if (StackFrame::IsTypeMarker(marker)) break;
-          return STUB;
         case wasm::WasmCode::kInterpreterEntry:
           return WASM_INTERPRETER_ENTRY;
         default:
@@ -1070,13 +1072,12 @@ Address StubFrame::GetCallerStackPointer() const {
   return fp() + ExitFrameConstants::kCallerSPOffset;
 }
 
-int StubFrame::LookupExceptionHandlerInTable(int* stack_slots) {
+int StubFrame::LookupExceptionHandlerInTable() {
   Code code = LookupCode();
   DCHECK(code.is_turbofanned());
   DCHECK_EQ(code.kind(), Code::BUILTIN);
   HandlerTable table(code);
   int pc_offset = static_cast<int>(pc() - code.InstructionStart());
-  *stack_slots = code.stack_slots();
   return table.LookupReturn(pc_offset);
 }
 
@@ -1138,11 +1139,11 @@ void JavaScriptFrame::Summarize(std::vector<FrameSummary>* functions) const {
   DCHECK(functions->empty());
   Code code = LookupCode();
   int offset = static_cast<int>(pc() - code.InstructionStart());
-  AbstractCode abstract_code = AbstractCode::cast(code);
+  Handle<AbstractCode> abstract_code(AbstractCode::cast(code), isolate());
   Handle<FixedArray> params = GetParameters();
   FrameSummary::JavaScriptFrameSummary summary(
-      isolate(), receiver(), function(), abstract_code, offset, IsConstructor(),
-      *params);
+      isolate(), receiver(), function(), *abstract_code, offset,
+      IsConstructor(), *params);
   functions->push_back(summary);
 }
 
@@ -1262,6 +1263,7 @@ void JavaScriptFrame::CollectFunctionAndOffsetForICStats(JSFunction function,
   if (maybe_script.IsScript()) {
     Script script = Script::cast(maybe_script);
     ic_info.line_num = script.GetLineNumber(source_pos) + 1;
+    ic_info.column_num = script.GetColumnNumber(source_pos);
     ic_info.script_name = ic_stats->GetOrCacheScriptName(script);
   }
 }
@@ -1315,7 +1317,7 @@ Object JavaScriptBuiltinContinuationFrame::context() const {
 void JavaScriptBuiltinContinuationWithCatchFrame::SetException(
     Object exception) {
   Address exception_argument_slot =
-      fp() + JavaScriptFrameConstants::kLastParameterOffset +
+      fp() + BuiltinContinuationFrameConstants::kFixedFrameSizeAboveFp +
       kSystemPointerSize;  // Skip over return value slot.
 
   // Only allow setting exception if previous value was the hole.
@@ -1618,7 +1620,7 @@ void OptimizedFrame::Summarize(std::vector<FrameSummary>* frames) const {
 }
 
 int OptimizedFrame::LookupExceptionHandlerInTable(
-    int* stack_slots, HandlerTable::CatchPrediction* prediction) {
+    int* data, HandlerTable::CatchPrediction* prediction) {
   // We cannot perform exception prediction on optimized code. Instead, we need
   // to use FrameSummary to find the corresponding code offset in unoptimized
   // code to perform prediction there.
@@ -1626,7 +1628,7 @@ int OptimizedFrame::LookupExceptionHandlerInTable(
   Code code = LookupCode();
   HandlerTable table(code);
   int pc_offset = static_cast<int>(pc() - code.InstructionStart());
-  if (stack_slots) *stack_slots = code.stack_slots();
+  DCHECK_NULL(data);  // Data is not used and will not return a value.
 
   // When the return pc has been replaced by a trampoline there won't be
   // a handler for this trampoline. Thus we need to use the return pc that
@@ -1667,8 +1669,8 @@ DeoptimizationData OptimizedFrame::GetDeoptimizationData(
 Object OptimizedFrame::receiver() const {
   Code code = LookupCode();
   if (code.kind() == Code::BUILTIN) {
-    Address argc_ptr = fp() + OptimizedBuiltinFrameConstants::kArgCOffset;
-    intptr_t argc = *reinterpret_cast<intptr_t*>(argc_ptr);
+    intptr_t argc = static_cast<int>(
+        Memory<intptr_t>(fp() + OptimizedBuiltinFrameConstants::kArgCOffset));
     intptr_t args_size =
         (StandardFrameConstants::kFixedSlotCountAboveFp + argc) *
         kSystemPointerSize;
@@ -1815,10 +1817,11 @@ void InterpretedFrame::WriteInterpreterRegister(int register_index,
 
 void InterpretedFrame::Summarize(std::vector<FrameSummary>* functions) const {
   DCHECK(functions->empty());
-  AbstractCode abstract_code = AbstractCode::cast(GetBytecodeArray());
+  Handle<AbstractCode> abstract_code(AbstractCode::cast(GetBytecodeArray()),
+                                     isolate());
   Handle<FixedArray> params = GetParameters();
   FrameSummary::JavaScriptFrameSummary summary(
-      isolate(), receiver(), function(), abstract_code, GetBytecodeOffset(),
+      isolate(), receiver(), function(), *abstract_code, GetBytecodeOffset(),
       IsConstructor(), *params);
   functions->push_back(summary);
 }
@@ -1911,6 +1914,10 @@ int WasmCompiledFrame::position() const {
   return FrameSummary::GetSingle(this).SourcePosition();
 }
 
+Object WasmCompiledFrame::context() const {
+  return wasm_instance().native_context();
+}
+
 void WasmCompiledFrame::Summarize(std::vector<FrameSummary>* functions) const {
   DCHECK(functions->empty());
   // The {WasmCode*} escapes this scope via the {FrameSummary}, which is fine,
@@ -1940,15 +1947,13 @@ bool WasmCompiledFrame::at_to_number_conversion() const {
   return !!pos;
 }
 
-int WasmCompiledFrame::LookupExceptionHandlerInTable(int* stack_slots) {
-  DCHECK_NOT_NULL(stack_slots);
+int WasmCompiledFrame::LookupExceptionHandlerInTable() {
   wasm::WasmCode* code =
       isolate()->wasm_engine()->code_manager()->LookupCode(pc());
   if (!code->IsAnonymous() && code->handler_table_size() > 0) {
     HandlerTable table(code->handler_table(), code->handler_table_size(),
                        HandlerTable::kReturnAddressBasedEncoding);
     int pc_offset = static_cast<int>(pc() - code->instruction_start());
-    *stack_slots = static_cast<int>(code->stack_slots());
     return table.LookupReturn(pc_offset);
   }
   return -1;
@@ -2260,5 +2265,161 @@ InnerPointerToCodeCache::GetCacheEntry(Address inner_pointer) {
   }
   return entry;
 }
+
+// Frame layout helper class implementation.
+// -------------------------------------------------------------------------
+
+namespace {
+
+int ArgumentPaddingSlots(int arg_count) {
+  return ShouldPadArguments(arg_count) ? 1 : 0;
+}
+
+// Some architectures need to push padding together with the TOS register
+// in order to maintain stack alignment.
+constexpr int TopOfStackRegisterPaddingSlots() { return kPadArguments ? 1 : 0; }
+
+bool BuiltinContinuationModeIsWithCatch(BuiltinContinuationMode mode) {
+  switch (mode) {
+    case BuiltinContinuationMode::STUB:
+    case BuiltinContinuationMode::JAVASCRIPT:
+      return false;
+    case BuiltinContinuationMode::JAVASCRIPT_WITH_CATCH:
+    case BuiltinContinuationMode::JAVASCRIPT_HANDLE_EXCEPTION:
+      return true;
+  }
+  UNREACHABLE();
+}
+
+}  // namespace
+
+InterpretedFrameInfo::InterpretedFrameInfo(int parameters_count_with_receiver,
+                                           int translation_height,
+                                           bool is_topmost,
+                                           FrameInfoKind frame_info_kind) {
+  const int locals_count = translation_height;
+
+  register_stack_slot_count_ =
+      InterpreterFrameConstants::RegisterStackSlotCount(locals_count);
+
+  static constexpr int kTheAccumulator = 1;
+  static constexpr int kTopOfStackPadding = TopOfStackRegisterPaddingSlots();
+  int maybe_additional_slots =
+      (is_topmost || frame_info_kind == FrameInfoKind::kConservative)
+          ? (kTheAccumulator + kTopOfStackPadding)
+          : 0;
+  frame_size_in_bytes_without_fixed_ =
+      (register_stack_slot_count_ + maybe_additional_slots) *
+      kSystemPointerSize;
+
+  // The 'fixed' part of the frame consists of the incoming parameters and
+  // the part described by InterpreterFrameConstants. This will include
+  // argument padding, when needed.
+  const int parameter_padding_slots =
+      ArgumentPaddingSlots(parameters_count_with_receiver);
+  const int fixed_frame_size =
+      InterpreterFrameConstants::kFixedFrameSize +
+      (parameters_count_with_receiver + parameter_padding_slots) *
+          kSystemPointerSize;
+  frame_size_in_bytes_ = frame_size_in_bytes_without_fixed_ + fixed_frame_size;
+}
+
+ArgumentsAdaptorFrameInfo::ArgumentsAdaptorFrameInfo(int translation_height) {
+  // Note: This is according to the Translation's notion of 'parameters' which
+  // differs to that of the SharedFunctionInfo, e.g. by including the receiver.
+  const int parameters_count = translation_height;
+  frame_size_in_bytes_without_fixed_ =
+      (parameters_count + ArgumentPaddingSlots(parameters_count)) *
+      kSystemPointerSize;
+  frame_size_in_bytes_ = frame_size_in_bytes_without_fixed_ +
+                         ArgumentsAdaptorFrameConstants::kFixedFrameSize;
+}
+
+ConstructStubFrameInfo::ConstructStubFrameInfo(int translation_height,
+                                               bool is_topmost,
+                                               FrameInfoKind frame_info_kind) {
+  // Note: This is according to the Translation's notion of 'parameters' which
+  // differs to that of the SharedFunctionInfo, e.g. by including the receiver.
+  const int parameters_count = translation_height;
+
+  // If the construct frame appears to be topmost we should ensure that the
+  // value of result register is preserved during continuation execution.
+  // We do this here by "pushing" the result of the constructor function to
+  // the top of the reconstructed stack and popping it in
+  // {Builtins::kNotifyDeoptimized}.
+
+  static constexpr int kTopOfStackPadding = TopOfStackRegisterPaddingSlots();
+  static constexpr int kTheResult = 1;
+  const int argument_padding = ArgumentPaddingSlots(parameters_count);
+
+  const int adjusted_height =
+      (is_topmost || frame_info_kind == FrameInfoKind::kConservative)
+          ? parameters_count + argument_padding + kTheResult +
+                kTopOfStackPadding
+          : parameters_count + argument_padding;
+  frame_size_in_bytes_without_fixed_ = adjusted_height * kSystemPointerSize;
+  frame_size_in_bytes_ = frame_size_in_bytes_without_fixed_ +
+                         ConstructFrameConstants::kFixedFrameSize;
+}
+
+BuiltinContinuationFrameInfo::BuiltinContinuationFrameInfo(
+    int translation_height,
+    const CallInterfaceDescriptor& continuation_descriptor,
+    const RegisterConfiguration* register_config, bool is_topmost,
+    DeoptimizeKind deopt_kind, BuiltinContinuationMode continuation_mode,
+    FrameInfoKind frame_info_kind) {
+  const bool is_conservative = frame_info_kind == FrameInfoKind::kConservative;
+
+  // Note: This is according to the Translation's notion of 'parameters' which
+  // differs to that of the SharedFunctionInfo, e.g. by including the receiver.
+  const int parameters_count = translation_height;
+  frame_has_result_stack_slot_ =
+      !is_topmost || deopt_kind == DeoptimizeKind::kLazy;
+  const int result_slot_count =
+      (frame_has_result_stack_slot_ || is_conservative) ? 1 : 0;
+
+  const int exception_slot_count =
+      (BuiltinContinuationModeIsWithCatch(continuation_mode) || is_conservative)
+          ? 1
+          : 0;
+
+  const int allocatable_register_count =
+      register_config->num_allocatable_general_registers();
+  const int padding_slot_count =
+      BuiltinContinuationFrameConstants::PaddingSlotCount(
+          allocatable_register_count);
+
+  const int register_parameter_count =
+      continuation_descriptor.GetRegisterParameterCount();
+  translated_stack_parameter_count_ =
+      parameters_count - register_parameter_count;
+  stack_parameter_count_ = translated_stack_parameter_count_ +
+                           result_slot_count + exception_slot_count;
+  const int stack_param_pad_count =
+      ArgumentPaddingSlots(stack_parameter_count_);
+
+  // If the builtins frame appears to be topmost we should ensure that the
+  // value of result register is preserved during continuation execution.
+  // We do this here by "pushing" the result of callback function to the
+  // top of the reconstructed stack and popping it in
+  // {Builtins::kNotifyDeoptimized}.
+  static constexpr int kTopOfStackPadding = TopOfStackRegisterPaddingSlots();
+  static constexpr int kTheResult = 1;
+  const int push_result_count =
+      (is_topmost || is_conservative) ? kTheResult + kTopOfStackPadding : 0;
+
+  frame_size_in_bytes_ =
+      kSystemPointerSize * (stack_parameter_count_ + stack_param_pad_count +
+                            allocatable_register_count + padding_slot_count +
+                            push_result_count) +
+      BuiltinContinuationFrameConstants::kFixedFrameSize;
+
+  frame_size_in_bytes_above_fp_ =
+      kSystemPointerSize * (allocatable_register_count + padding_slot_count +
+                            push_result_count) +
+      (BuiltinContinuationFrameConstants::kFixedFrameSize -
+       BuiltinContinuationFrameConstants::kFixedFrameSizeAboveFp);
+}
+
 }  // namespace internal
 }  // namespace v8

@@ -83,6 +83,8 @@ class StackFrameBase {
   virtual int GetLineNumber() = 0;
   // Return 1-based column number, including column offset if first line.
   virtual int GetColumnNumber() = 0;
+  // Return 0-based Wasm function index. Returns -1 for non-Wasm frames.
+  virtual int GetWasmFunctionIndex();
 
   // Returns index for Promise.all() async frames, or -1 for other frames.
   virtual int GetPromiseIndex() const = 0;
@@ -174,8 +176,9 @@ class WasmStackFrame : public StackFrameBase {
   Handle<Object> GetWasmInstance() override;
 
   int GetPosition() const override;
-  int GetLineNumber() override { return wasm_func_index_; }
+  int GetLineNumber() override { return 0; }
   int GetColumnNumber() override;
+  int GetWasmFunctionIndex() override { return wasm_func_index_; }
 
   int GetPromiseIndex() const override { return GetPosition(); }
 
@@ -283,6 +286,18 @@ class ErrorUtils : public AllStatic {
   static MaybeHandle<Object> FormatStackTrace(Isolate* isolate,
                                               Handle<JSObject> error,
                                               Handle<Object> stack_trace);
+
+  static Handle<Object> NewIteratorError(Isolate* isolate,
+                                         Handle<Object> source);
+  static Handle<Object> NewCalledNonCallableError(Isolate* isolate,
+                                                  Handle<Object> source);
+  static Handle<Object> NewConstructedNonConstructable(Isolate* isolate,
+                                                       Handle<Object> source);
+  static Object ThrowLoadFromNullOrUndefined(Isolate* isolate,
+                                             Handle<Object> object);
+  static Object ThrowLoadFromNullOrUndefined(Isolate* isolate,
+                                             Handle<Object> object,
+                                             MaybeHandle<Object> key);
 };
 
 class MessageFormatter {

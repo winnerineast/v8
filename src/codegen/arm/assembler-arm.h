@@ -41,6 +41,7 @@
 #define V8_CODEGEN_ARM_ASSEMBLER_ARM_H_
 
 #include <stdio.h>
+#include <memory>
 #include <vector>
 
 #include "src/codegen/arm/constants-arm.h"
@@ -305,9 +306,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   explicit Assembler(const AssemblerOptions&,
                      std::unique_ptr<AssemblerBuffer> = {});
 
-  virtual ~Assembler();
+  ~Assembler() override;
 
-  virtual void AbortedCodeGeneration() { pending_32_bit_constants_.clear(); }
+  void AbortedCodeGeneration() override { pending_32_bit_constants_.clear(); }
 
   // GetCode emits any pending (non-emitted) code and fills the descriptor desc.
   static constexpr int kNoHandlerTable = 0;
@@ -1197,6 +1198,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // not have to check for overflow. The same is true for writes of large
   // relocation info entries.
   static constexpr int kGap = 32;
+  STATIC_ASSERT(AssemblerBase::kMinimalBufferSize >= 2 * kGap);
 
   // Relocation info generation
   // Each relocation is encoded as a variable size value

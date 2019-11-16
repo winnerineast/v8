@@ -23,7 +23,7 @@ class V8_EXPORT_PRIVATE RegExpMacroAssemblerMIPS
   virtual void AdvanceRegister(int reg, int by);
   virtual void Backtrack();
   virtual void Bind(Label* label);
-  virtual void CheckAtStart(Label* on_at_start);
+  virtual void CheckAtStart(int cp_offset, Label* on_at_start);
   virtual void CheckCharacter(uint32_t c, Label* on_equal);
   virtual void CheckCharacterAfterAnd(uint32_t c,
                                       uint32_t mask,
@@ -126,8 +126,9 @@ class V8_EXPORT_PRIVATE RegExpMacroAssemblerMIPS
   // the frame in GetCode.
   static const int kSuccessfulCaptures = kInputString - kPointerSize;
   static const int kStringStartMinusOne = kSuccessfulCaptures - kPointerSize;
+  static const int kBacktrackCount = kStringStartMinusOne - kSystemPointerSize;
   // First register address. Following registers are below it on the stack.
-  static const int kRegisterZero = kStringStartMinusOne - kPointerSize;
+  static const int kRegisterZero = kBacktrackCount - kSystemPointerSize;
 
   // Initial size of code buffer.
   static const int kRegExpCodeSize = 1024;

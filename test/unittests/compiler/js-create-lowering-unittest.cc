@@ -172,7 +172,8 @@ TEST_F(JSCreateLoweringTest, JSCreateFunctionContextViaInlinedAllocation) {
 // JSCreateWithContext
 
 TEST_F(JSCreateLoweringTest, JSCreateWithContext) {
-  Handle<ScopeInfo> scope_info = ScopeInfo::CreateForEmptyFunction(isolate());
+  Handle<ScopeInfo> scope_info =
+      ReadOnlyRoots(isolate()).empty_function_scope_info_handle();
   Node* const object = Parameter(Type::Receiver());
   Node* const context = Parameter(Type::Any());
   Node* const effect = graph()->start();
@@ -181,18 +182,20 @@ TEST_F(JSCreateLoweringTest, JSCreateWithContext) {
       Reduce(graph()->NewNode(javascript()->CreateWithContext(scope_info),
                               object, context, effect, control));
   ASSERT_TRUE(r.Changed());
-  EXPECT_THAT(r.replacement(),
-              IsFinishRegion(IsAllocate(IsNumberConstant(Context::SizeFor(
-                                            Context::MIN_CONTEXT_SLOTS)),
-                                        IsBeginRegion(_), control),
-                             _));
+  EXPECT_THAT(
+      r.replacement(),
+      IsFinishRegion(IsAllocate(IsNumberConstant(Context::SizeFor(
+                                    Context::MIN_CONTEXT_EXTENDED_SLOTS)),
+                                IsBeginRegion(_), control),
+                     _));
 }
 
 // -----------------------------------------------------------------------------
 // JSCreateCatchContext
 
 TEST_F(JSCreateLoweringTest, JSCreateCatchContext) {
-  Handle<ScopeInfo> scope_info = ScopeInfo::CreateForEmptyFunction(isolate());
+  Handle<ScopeInfo> scope_info =
+      ReadOnlyRoots(isolate()).empty_function_scope_info_handle();
   Node* const exception = Parameter(Type::Receiver());
   Node* const context = Parameter(Type::Any());
   Node* const effect = graph()->start();

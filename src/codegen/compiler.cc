@@ -135,6 +135,12 @@ ScriptOriginOptions OriginOptionsForEval(Object script) {
                              outer_origin_options.IsOpaque());
 }
 
+REPLMode OriginReplMode(Object script) {
+  if (!script.IsScript()) return REPLMode::kNo;
+
+  return Script::cast(script).is_repl_mode() ? REPLMode::kYes : REPLMode::kNo;
+}
+
 }  // namespace
 
 // ----------------------------------------------------------------------------
@@ -410,6 +416,12 @@ void InstallUnoptimizedCode(UnoptimizedCompilationInfo* compilation_info,
     DCHECK(!compilation_info->has_asm_wasm_data());
     DCHECK(!shared_info->HasFeedbackMetadata());
 
+    // If the function failed asm-wasm compilation, mark asm_wasm as broken
+    // to ensure we don't try to compile as asm-wasm.
+    if (compilation_info->literal()->scope()->IsAsmModule()) {
+      shared_info->set_is_asm_wasm_broken(true);
+    }
+
     InstallBytecodeArray(compilation_info->bytecode_array(), shared_info,
                          parse_info, isolate);
 
@@ -529,20 +541,16 @@ std::unique_ptr<UnoptimizedCompilationJob> GenerateUnoptimizedCode(
   DisallowHeapAccess no_heap_access;
   DCHECK(inner_function_jobs->empty());
 
-  if (!Compiler::Analyze(parse_info)) {
-    return std::unique_ptr<UnoptimizedCompilationJob>();
+  std::unique_ptr<UnoptimizedCompilationJob> job;
+  if (Compiler::Analyze(parse_info)) {
+    job = ExecuteUnoptimizedCompileJobs(parse_info, parse_info->literal(),
+                                        allocator, inner_function_jobs);
   }
-
-  // Prepare and execute compilation of the outer-most function.
-  std::unique_ptr<UnoptimizedCompilationJob> outer_function_job(
-      ExecuteUnoptimizedCompileJobs(parse_info, parse_info->literal(),
-                                    allocator, inner_function_jobs));
-  if (!outer_function_job) return std::unique_ptr<UnoptimizedCompilationJob>();
 
   // Character stream shouldn't be used again.
   parse_info->ResetCharacterStream();
 
-  return outer_function_job;
+  return job;
 }
 
 MaybeHandle<SharedFunctionInfo> GenerateUnoptimizedCodeForToplevel(
@@ -664,21 +672,25 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Code> GetCodeFromOptimizedCodeCache(
       function->GetIsolate(),
       RuntimeCallCounterId::kCompileGetFromOptimizedCodeMap);
   Handle<SharedFunctionInfo> shared(function->shared(), function->GetIsolate());
+  Isolate* isolate = function->GetIsolate();
   DisallowHeapAllocation no_gc;
-  if (osr_offset.IsNone()) {
-    if (function->has_feedback_vector()) {
-      FeedbackVector feedback_vector = function->feedback_vector();
-      feedback_vector.EvictOptimizedCodeMarkedForDeoptimization(
-          function->shared(), "GetCodeFromOptimizedCodeCache");
-      Code code = feedback_vector.optimized_code();
-
-      if (!code.is_null()) {
-        // Caching of optimized code enabled and optimized code found.
-        DCHECK(!code.marked_for_deoptimization());
-        DCHECK(function->shared().is_compiled());
-        return Handle<Code>(code, feedback_vector.GetIsolate());
-      }
-    }
+  Code code;
+  if (osr_offset.IsNone() && function->has_feedback_vector()) {
+    FeedbackVector feedback_vector = function->feedback_vector();
+    feedback_vector.EvictOptimizedCodeMarkedForDeoptimization(
+        function->shared(), "GetCodeFromOptimizedCodeCache");
+    code = feedback_vector.optimized_code();
+  } else if (!osr_offset.IsNone()) {
+    code = function->context()
+               .native_context()
+               .GetOSROptimizedCodeCache()
+               .GetOptimizedCode(shared, osr_offset, isolate);
+  }
+  if (!code.is_null()) {
+    // Caching of optimized code enabled and optimized code found.
+    DCHECK(!code.marked_for_deoptimization());
+    DCHECK(function->shared().is_compiled());
+    return Handle<Code>(code, isolate);
   }
   return MaybeHandle<Code>();
 }
@@ -709,12 +721,15 @@ void InsertCodeIntoOptimizedCodeCache(
   // Cache optimized context-specific code.
   Handle<JSFunction> function = compilation_info->closure();
   Handle<SharedFunctionInfo> shared(function->shared(), function->GetIsolate());
-  Handle<Context> native_context(function->context().native_context(),
-                                 function->GetIsolate());
+  Handle<NativeContext> native_context(function->context().native_context(),
+                                       function->GetIsolate());
   if (compilation_info->osr_offset().IsNone()) {
     Handle<FeedbackVector> vector =
         handle(function->feedback_vector(), function->GetIsolate());
     FeedbackVector::SetOptimizedCode(vector, code);
+  } else {
+    OSROptimizedCodeCache::AddOptimizedCode(native_context, shared, code,
+                                            compilation_info->osr_offset());
   }
 }
 
@@ -1181,6 +1196,9 @@ bool Compiler::CollectSourcePositions(Isolate* isolate,
   DCHECK(shared_info->HasBytecodeArray());
   DCHECK(!shared_info->GetBytecodeArray().HasSourcePositionTable());
 
+  // Source position collection should be context independent.
+  NullContextScope null_context_scope(isolate);
+
   // Collecting source positions requires allocating a new source position
   // table.
   DCHECK(AllowHeapAllocation::IsAllowed());
@@ -1218,58 +1236,48 @@ bool Compiler::CollectSourcePositions(Isolate* isolate,
   // Parse and update ParseInfo with the results. Don't update parsing
   // statistics since we've already parsed the code before.
   if (!parsing::ParseAny(&parse_info, shared_info, isolate,
-                         parsing::UpdateStatisticsMode::kNo)) {
+                         parsing::ReportErrorsAndStatisticsMode::kNo)) {
     // Parsing failed probably as a result of stack exhaustion.
     bytecode->SetSourcePositionsFailedToCollect();
     return FailWithPendingException(
         isolate, &parse_info, Compiler::ClearExceptionFlag::CLEAR_EXCEPTION);
   }
 
+  // Character stream shouldn't be used again.
+  parse_info.ResetCharacterStream();
+
   // Generate the unoptimized bytecode.
   // TODO(v8:8510): Consider forcing preparsing of inner functions to avoid
   // wasting time fully parsing them when they won't ever be used.
-  UnoptimizedCompilationJobList inner_function_jobs;
-  std::unique_ptr<UnoptimizedCompilationJob> outer_function_job(
-      GenerateUnoptimizedCode(&parse_info, isolate->allocator(),
-                              &inner_function_jobs));
-  if (!outer_function_job) {
-    // Recompiling failed probably as a result of stack exhaustion.
-    bytecode->SetSourcePositionsFailedToCollect();
-    return FailWithPendingException(
-        isolate, &parse_info, Compiler::ClearExceptionFlag::CLEAR_EXCEPTION);
-  }
-
-  DCHECK(outer_function_job->compilation_info()->collect_source_positions());
-
-  // TODO(v8:8510) Avoid re-allocating bytecode array/constant pool and
-  // re-internalizeing the ast values. Maybe we could use the
-  // unoptimized_compilation_flag to signal that all we need is the source
-  // position table (and we could do the DCHECK that the bytecode array is the
-  // same in the bytecode-generator, by comparing the real bytecode array on the
-  // SFI with the off-heap bytecode array).
-
-  // Internalize ast values onto the heap.
-  parse_info.ast_value_factory()->Internalize(isolate);
-
+  std::unique_ptr<UnoptimizedCompilationJob> job;
   {
-    // Allocate scope infos for the literal.
-    DeclarationScope::AllocateScopeInfos(&parse_info, isolate);
-    CHECK_EQ(outer_function_job->FinalizeJob(shared_info, isolate),
-             CompilationJob::SUCCEEDED);
+    if (!Compiler::Analyze(&parse_info)) {
+      // Recompiling failed probably as a result of stack exhaustion.
+      bytecode->SetSourcePositionsFailedToCollect();
+      return FailWithPendingException(
+          isolate, &parse_info, Compiler::ClearExceptionFlag::CLEAR_EXCEPTION);
+    }
+
+    job = interpreter::Interpreter::NewSourcePositionCollectionJob(
+        &parse_info, parse_info.literal(), bytecode, isolate->allocator());
+
+    if (!job || job->ExecuteJob() != CompilationJob::SUCCEEDED ||
+        job->FinalizeJob(shared_info, isolate) != CompilationJob::SUCCEEDED) {
+      // Recompiling failed probably as a result of stack exhaustion.
+      bytecode->SetSourcePositionsFailedToCollect();
+      return FailWithPendingException(
+          isolate, &parse_info, Compiler::ClearExceptionFlag::CLEAR_EXCEPTION);
+    }
   }
 
-  // Update the source position table on the original bytecode.
-  DCHECK(bytecode->IsBytecodeEqual(
-      *outer_function_job->compilation_info()->bytecode_array()));
-  DCHECK(outer_function_job->compilation_info()->has_bytecode_array());
-  ByteArray source_position_table = outer_function_job->compilation_info()
-                                        ->bytecode_array()
-                                        ->SourcePositionTable();
-  bytecode->set_source_position_table(source_position_table);
+  DCHECK(job->compilation_info()->collect_source_positions());
+
   // If debugging, make sure that instrumented bytecode has the source position
   // table set on it as well.
   if (shared_info->HasDebugInfo() &&
       shared_info->GetDebugInfo().HasInstrumentedBytecodeArray()) {
+    ByteArray source_position_table =
+        job->compilation_info()->bytecode_array()->SourcePositionTable();
     shared_info->GetDebugBytecodeArray().set_source_position_table(
         source_position_table);
   }
@@ -1354,6 +1362,16 @@ bool Compiler::Compile(Handle<SharedFunctionInfo> shared_info,
     // Collect source positions immediately to try and flush out bytecode
     // mismatches.
     SharedFunctionInfo::EnsureSourcePositionsAvailable(isolate, shared_info);
+
+    // Do the same for eagerly compiled inner functions.
+    for (auto&& inner_job : inner_function_jobs) {
+      Handle<SharedFunctionInfo> inner_shared_info =
+          Compiler::GetSharedFunctionInfo(
+              inner_job->compilation_info()->literal(), parse_info.script(),
+              isolate);
+      SharedFunctionInfo::EnsureSourcePositionsAvailable(isolate,
+                                                         inner_shared_info);
+    }
   }
 
   return true;
@@ -1530,8 +1548,9 @@ MaybeHandle<JSFunction> Compiler::GetFunctionFromEval(
     allow_eval_cache = true;
   } else {
     ParseInfo parse_info(isolate);
-    script = parse_info.CreateScript(
-        isolate, source, OriginOptionsForEval(outer_info->script()));
+    script = parse_info.CreateScript(isolate, source,
+                                     OriginOptionsForEval(outer_info->script()),
+                                     OriginReplMode(outer_info->script()));
     script->set_compilation_type(Script::COMPILATION_TYPE_EVAL);
     script->set_eval_from_shared(*outer_info);
     if (eval_position == kNoSourcePosition) {
@@ -1550,10 +1569,6 @@ MaybeHandle<JSFunction> Compiler::GetFunctionFromEval(
       }
     }
     script->set_eval_from_position(eval_position);
-    TRACE_EVENT_OBJECT_SNAPSHOT_WITH_ID(
-        TRACE_DISABLED_BY_DEFAULT("v8.compile"), "Script",
-        TRACE_ID_WITH_SCOPE(Script::kTraceScope, script->id()),
-        script->ToTracedValue());
 
     parse_info.set_eval();
     parse_info.set_language_mode(language_mode);
@@ -1640,13 +1655,14 @@ bool ModifyCodeGenerationFromStrings(Isolate* isolate, Handle<Context> context,
       isolate->modify_code_gen_callback();
   RuntimeCallTimerScope timer(
       isolate, RuntimeCallCounterId::kCodeGenerationFromStringsCallbacks);
-  MaybeLocal<v8::String> modified_source =
+  ModifyCodeGenerationFromStringsResult result =
       modify_callback(v8::Utils::ToLocal(context), v8::Utils::ToLocal(*source));
-  if (modified_source.IsEmpty()) return false;
-
-  // Use the new source (which might be the same as the old source) and return.
-  *source = Utils::OpenHandle(*modified_source.ToLocalChecked(), false);
-  return true;
+  if (result.codegen_allowed && !result.modified_source.IsEmpty()) {
+    // Use the new source (which might be the same as the old source).
+    *source =
+        Utils::OpenHandle(*result.modified_source.ToLocalChecked(), false);
+  }
+  return result.codegen_allowed;
 }
 
 // Run Embedder-mandated checks before generating code from a string.
@@ -1664,38 +1680,49 @@ bool ModifyCodeGenerationFromStrings(Isolate* isolate, Handle<Context> context,
 // - !source_is_null() and unknown_object can't be true at the same time.
 std::pair<MaybeHandle<String>, bool> Compiler::ValidateDynamicCompilationSource(
     Isolate* isolate, Handle<Context> context,
-    Handle<i::Object> source_object) {
-  Handle<String> source;
-  if (source_object->IsString()) source = Handle<String>::cast(source_object);
-
+    Handle<i::Object> original_source) {
   // Check if the context unconditionally allows code gen from strings.
   // allow_code_gen_from_strings can be many things, so we'll always check
   // against the 'false' literal, so that e.g. undefined and 'true' are treated
   // the same.
   if (!context->allow_code_gen_from_strings().IsFalse(isolate)) {
-    return {source, !source_object->IsString()};
+    if (!original_source->IsString()) {
+      return {MaybeHandle<String>(), true};
+    }
+    return {Handle<String>::cast(original_source), false};
   }
 
   // Check if the context allows code generation for this string.
   // allow_code_gen_callback only allows proper strings.
   // (I.e., let allow_code_gen_callback decide, if it has been set.)
   if (isolate->allow_code_gen_callback()) {
-    if (source_object->IsString() &&
-        CodeGenerationFromStringsAllowed(isolate, context, source)) {
-      return {source, !source_object->IsString()};
+    if (!original_source->IsString()) {
+      return {MaybeHandle<String>(), true};
     }
+    Handle<String> string_source = Handle<String>::cast(original_source);
+    if (!CodeGenerationFromStringsAllowed(isolate, context, string_source)) {
+      return {MaybeHandle<String>(), false};
+    }
+    return {string_source, false};
   }
 
   // Check if the context wants to block or modify this source object.
   // Double-check that we really have a string now.
   // (Let modify_code_gen_callback decide, if it's been set.)
   if (isolate->modify_code_gen_callback()) {
-    if (ModifyCodeGenerationFromStrings(isolate, context, &source_object) &&
-        source_object->IsString())
-      return {Handle<String>::cast(source_object), false};
+    Handle<i::Object> modified_source = original_source;
+    if (!ModifyCodeGenerationFromStrings(isolate, context, &modified_source)) {
+      return {MaybeHandle<String>(), false};
+    }
+    if (!modified_source->IsString()) {
+      return {MaybeHandle<String>(), true};
+    }
+    return {Handle<String>::cast(modified_source), false};
   }
 
-  return {MaybeHandle<String>(), !source_object->IsString()};
+  // If unconditional codegen was disabled, and no callback defined, we block
+  // strings and allow all other objects.
+  return {MaybeHandle<String>(), !original_source->IsString()};
 }
 
 MaybeHandle<JSFunction> Compiler::GetFunctionFromValidatedString(
@@ -1899,6 +1926,12 @@ struct ScriptCompileTimerScope {
       case CacheBehaviour::kConsumeCodeCache:
         return isolate_->counters()->compile_script_with_consume_cache();
 
+      // Note that this only counts the finalization part of streaming, the
+      // actual streaming compile is counted by BackgroundCompileTask into
+      // "compile_script_on_background".
+      case CacheBehaviour::kNoCacheBecauseStreamingSource:
+        return isolate_->counters()->compile_script_streaming_finalization();
+
       case CacheBehaviour::kNoCacheBecauseInlineScript:
         return isolate_->counters()
             ->compile_script_no_cache_because_inline_script();
@@ -1918,9 +1951,6 @@ struct ScriptCompileTimerScope {
       // TODO(leszeks): Consider counting separately once modules are more
       // common.
       case CacheBehaviour::kNoCacheBecauseModule:
-      // TODO(leszeks): Count separately or remove entirely once we have
-      // background compilation.
-      case CacheBehaviour::kNoCacheBecauseStreamingSource:
       case CacheBehaviour::kNoCacheBecauseV8Extension:
       case CacheBehaviour::kNoCacheBecauseExtensionModule:
       case CacheBehaviour::kNoCacheBecausePacScript:
@@ -1941,8 +1971,8 @@ Handle<Script> NewScript(Isolate* isolate, ParseInfo* parse_info,
                          ScriptOriginOptions origin_options,
                          NativesFlag natives) {
   // Create a script object describing the script to be compiled.
-  Handle<Script> script =
-      parse_info->CreateScript(isolate, source, origin_options, natives);
+  Handle<Script> script = parse_info->CreateScript(
+      isolate, source, origin_options, script_details.repl_mode, natives);
   Handle<Object> script_name;
   if (script_details.name_obj.ToHandle(&script_name)) {
     script->set_name(*script_name);
@@ -1958,10 +1988,6 @@ Handle<Script> NewScript(Isolate* isolate, ParseInfo* parse_info,
     script->set_host_defined_options(*host_defined_options);
   }
   LOG(isolate, ScriptDetails(*script));
-  TRACE_EVENT_OBJECT_SNAPSHOT_WITH_ID(
-      TRACE_DISABLED_BY_DEFAULT("v8.compile"), "Script",
-      TRACE_ID_WITH_SCOPE(Script::kTraceScope, script->id()),
-      script->ToTracedValue());
   return script;
 }
 
@@ -2039,6 +2065,7 @@ MaybeHandle<SharedFunctionInfo> Compiler::GetSharedFunctionInfoForScript(
     // No cache entry found compile the script.
     NewScript(isolate, &parse_info, source, script_details, origin_options,
               natives);
+    DCHECK_EQ(parse_info.is_repl_mode(), parse_info.script()->is_repl_mode());
 
     // Compile the function and add it to the isolate cache.
     if (origin_options.IsModule()) parse_info.set_module();
@@ -2112,7 +2139,7 @@ MaybeHandle<JSFunction> Compiler::GetWrappedFunction(
     script->set_wrapped_arguments(*arguments);
 
     parse_info.set_eval();  // Use an eval scope as declaration scope.
-    parse_info.set_wrapped_as_function();
+    parse_info.set_function_syntax_kind(FunctionSyntaxKind::kWrapped);
     // TODO(delphick): Remove this and instead make the wrapped and wrapper
     // functions fully non-lazy instead thus preventing source positions from
     // being omitted.
@@ -2229,18 +2256,22 @@ Handle<SharedFunctionInfo> Compiler::GetSharedFunctionInfo(
     // this function, replace the uncompiled data with one that includes it.
     if (literal->produced_preparse_data() != nullptr &&
         existing->HasUncompiledDataWithoutPreparseData()) {
-      DCHECK(literal->inferred_name()->Equals(
-          existing->uncompiled_data().inferred_name()));
+      Handle<UncompiledData> existing_uncompiled_data =
+          handle(existing->uncompiled_data(), isolate);
       DCHECK_EQ(literal->start_position(),
-                existing->uncompiled_data().start_position());
+                existing_uncompiled_data->start_position());
       DCHECK_EQ(literal->end_position(),
-                existing->uncompiled_data().end_position());
+                existing_uncompiled_data->end_position());
+      // Use existing uncompiled data's inferred name as it may be more
+      // accurate than the literal we preparsed.
+      Handle<String> inferred_name =
+          handle(existing_uncompiled_data->inferred_name(), isolate);
       Handle<PreparseData> preparse_data =
           literal->produced_preparse_data()->Serialize(isolate);
       Handle<UncompiledData> new_uncompiled_data =
           isolate->factory()->NewUncompiledDataWithPreparseData(
-              literal->inferred_name(), literal->start_position(),
-              literal->end_position(), preparse_data);
+              inferred_name, existing_uncompiled_data->start_position(),
+              existing_uncompiled_data->end_position(), preparse_data);
       existing->set_uncompiled_data(*new_uncompiled_data);
     }
     return existing;

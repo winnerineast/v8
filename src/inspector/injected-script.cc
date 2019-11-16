@@ -289,7 +289,7 @@ Response InjectedScript::getProperties(
   int sessionId = m_sessionId;
   v8::TryCatch tryCatch(isolate);
 
-  *properties = v8::base::make_unique<Array<PropertyDescriptor>>();
+  *properties = std::make_unique<Array<PropertyDescriptor>>();
   std::vector<PropertyMirror> mirrors;
   PropertyAccumulator accumulator(&mirrors);
   if (!ValueMirror::getProperties(context, object, ownProperties,
@@ -366,10 +366,8 @@ Response InjectedScript::getInternalAndPrivateProperties(
         internalProperties,
     std::unique_ptr<protocol::Array<PrivatePropertyDescriptor>>*
         privateProperties) {
-  *internalProperties =
-      v8::base::make_unique<Array<InternalPropertyDescriptor>>();
-  *privateProperties =
-      v8::base::make_unique<Array<PrivatePropertyDescriptor>>();
+  *internalProperties = std::make_unique<Array<InternalPropertyDescriptor>>();
+  *privateProperties = std::make_unique<Array<PrivatePropertyDescriptor>>();
 
   if (!value->IsObject()) return Response::OK();
 
@@ -462,7 +460,7 @@ Response InjectedScript::wrapObjectMirror(
   if (!response.isSuccess()) return response;
   if (customPreviewEnabled && value->IsObject()) {
     std::unique_ptr<protocol::Runtime::CustomPreview> customPreview;
-    generateCustomPreview(sessionId, groupName, context, value.As<v8::Object>(),
+    generateCustomPreview(sessionId, groupName, value.As<v8::Object>(),
                           customPreviewConfig, maxCustomPreviewDepth,
                           &customPreview);
     if (customPreview) (*result)->setCustomPreview(std::move(customPreview));
@@ -493,14 +491,18 @@ std::unique_ptr<protocol::Runtime::RemoteObject> InjectedScript::wrapTable(
                              &limit, &limit, &preview);
   if (!preview) return nullptr;
 
-  std::unordered_set<String16> selectedColumns;
+  std::vector<String16> selectedColumns;
+  std::unordered_set<String16> columnSet;
   v8::Local<v8::Array> v8Columns;
   if (maybeColumns.ToLocal(&v8Columns)) {
     for (uint32_t i = 0; i < v8Columns->Length(); ++i) {
       v8::Local<v8::Value> column;
       if (v8Columns->Get(context, i).ToLocal(&column) && column->IsString()) {
-        selectedColumns.insert(
-            toProtocolString(isolate, column.As<v8::String>()));
+        String16 name = toProtocolString(isolate, column.As<v8::String>());
+        if (columnSet.find(name) == columnSet.end()) {
+          columnSet.insert(name);
+          selectedColumns.push_back(name);
+        }
       }
     }
   }
@@ -509,14 +511,18 @@ std::unique_ptr<protocol::Runtime::RemoteObject> InjectedScript::wrapTable(
          *preview->getProperties()) {
       ObjectPreview* columnPreview = column->getValuePreview(nullptr);
       if (!columnPreview) continue;
-
-      auto filtered = v8::base::make_unique<Array<PropertyPreview>>();
+      // Use raw pointer here since the lifetime of each PropertyPreview is
+      // ensured by columnPreview. This saves an additional clone.
+      std::unordered_map<String16, PropertyPreview*> columnMap;
       for (const std::unique_ptr<PropertyPreview>& property :
            *columnPreview->getProperties()) {
-        if (selectedColumns.find(property->getName()) !=
-            selectedColumns.end()) {
-          filtered->emplace_back(property->clone());
-        }
+        if (columnSet.find(property->getName()) == columnSet.end()) continue;
+        columnMap[property->getName()] = property.get();
+      }
+      auto filtered = std::make_unique<Array<PropertyPreview>>();
+      for (const String16& column : selectedColumns) {
+        if (columnMap.find(column) == columnMap.end()) continue;
+        filtered->push_back(columnMap[column]->clone());
       }
       columnPreview->setProperties(std::move(filtered));
     }

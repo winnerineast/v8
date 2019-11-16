@@ -16,6 +16,7 @@
 #include "src/common/globals.h"
 #include "src/execution/isolate.h"
 #include "src/heap/factory.h"
+#include "src/objects/function-syntax-kind.h"
 #include "src/objects/literal-objects.h"
 #include "src/objects/smi.h"
 #include "src/parsing/token.h"
@@ -169,7 +170,7 @@ class AstNode: public ZoneObject {
   void* operator new(size_t size);
 
   int position_;
-  using NodeTypeField = BitField<NodeType, 0, 6>;
+  using NodeTypeField = base::BitField<NodeType, 0, 6>;
 
  protected:
   uint32_t bit_field_;
@@ -246,11 +247,19 @@ class Expression : public AstNode {
   // that this also checks for loads of the global "undefined" variable.
   bool IsUndefinedLiteral() const;
 
+  // True if either null literal or undefined literal.
+  inline bool IsNullOrUndefinedLiteral() const {
+    return IsNullLiteral() || IsUndefinedLiteral();
+  }
+
+  // True if a literal and not null or undefined.
+  bool IsLiteralButNotNullOrUndefined() const;
+
   bool IsCompileTimeValue();
 
   bool IsPattern() {
     STATIC_ASSERT(kObjectLiteral + 1 == kArrayLiteral);
-    return IsInRange(node_type(), kObjectLiteral, kArrayLiteral);
+    return base::IsInRange(node_type(), kObjectLiteral, kArrayLiteral);
   }
 
   bool is_parenthesized() const {
@@ -715,11 +724,14 @@ class BreakStatement final : public JumpStatement {
 
 class ReturnStatement final : public JumpStatement {
  public:
-  enum Type { kNormal, kAsyncReturn };
+  enum Type { kNormal, kAsyncReturn, kSyntheticAsyncReturn };
   Expression* expression() const { return expression_; }
 
   Type type() const { return TypeField::decode(bit_field_); }
-  bool is_async_return() const { return type() == kAsyncReturn; }
+  bool is_async_return() const { return type() != kNormal; }
+  bool is_synthetic_async_return() const {
+    return type() == kSyntheticAsyncReturn;
+  }
 
   int end_position() const { return end_position_; }
 
@@ -736,7 +748,7 @@ class ReturnStatement final : public JumpStatement {
   Expression* expression_;
   int end_position_;
 
-  using TypeField = JumpStatement::NextBitField<Type, 1>;
+  using TypeField = JumpStatement::NextBitField<Type, 2>;
 };
 
 
@@ -906,6 +918,10 @@ class TryCatchStatement final : public TryStatement {
       HandlerTable::CatchPrediction outer_catch_prediction) const {
     return catch_prediction_ != HandlerTable::UNCAUGHT ||
            outer_catch_prediction != HandlerTable::UNCAUGHT;
+  }
+
+  bool is_try_catch_for_async() {
+    return catch_prediction_ == HandlerTable::ASYNC_AWAIT;
   }
 
  private:
@@ -1369,12 +1385,6 @@ class ObjectLiteral final : public AggregateLiteral {
       static_cast<int>(AggregateLiteral::kNeedsInitialAllocationSite) <
       static_cast<int>(kFastElements));
 
-  struct Accessors: public ZoneObject {
-    Accessors() : getter(nullptr), setter(nullptr) {}
-    ObjectLiteralProperty* getter;
-    ObjectLiteralProperty* setter;
-  };
-
  private:
   friend class AstNodeFactory;
 
@@ -1402,7 +1412,6 @@ class ObjectLiteral final : public AggregateLiteral {
   void set_has_null_protoype(bool has_null_prototype) {
     bit_field_ = HasNullPrototypeField::update(bit_field_, has_null_prototype);
   }
-
   uint32_t boilerplate_properties_;
   Handle<ObjectBoilerplateDescription> boilerplate_description_;
   ZoneList<Property*> properties_;
@@ -2198,14 +2207,6 @@ class Throw final : public Expression {
 
 class FunctionLiteral final : public Expression {
  public:
-  enum FunctionType {
-    kAnonymousExpression,
-    kNamedExpression,
-    kDeclaration,
-    kAccessorOrMethod,
-    kWrapped,
-  };
-
   enum ParameterFlag : uint8_t {
     kNoDuplicateParameters,
     kHasDuplicateParameters
@@ -2227,12 +2228,8 @@ class FunctionLiteral final : public Expression {
   int function_token_position() const { return function_token_position_; }
   int start_position() const;
   int end_position() const;
-  bool is_declaration() const { return function_type() == kDeclaration; }
-  bool is_named_expression() const {
-    return function_type() == kNamedExpression;
-  }
   bool is_anonymous_expression() const {
-    return function_type() == kAnonymousExpression;
+    return syntax_kind() == FunctionSyntaxKind::kAnonymousExpression;
   }
 
   void mark_as_oneshot_iife() {
@@ -2242,7 +2239,6 @@ class FunctionLiteral final : public Expression {
   bool is_toplevel() const {
     return function_literal_id() == kFunctionLiteralIdTopLevel;
   }
-  bool is_wrapped() const { return function_type() == kWrapped; }
   V8_EXPORT_PRIVATE LanguageMode language_mode() const;
 
   static bool NeedsHomeObject(Expression* expr);
@@ -2312,8 +2308,8 @@ class FunctionLiteral final : public Expression {
   V8_EXPORT_PRIVATE bool ShouldEagerCompile() const;
   V8_EXPORT_PRIVATE void SetShouldEagerCompile();
 
-  FunctionType function_type() const {
-    return FunctionTypeBits::decode(bit_field_);
+  FunctionSyntaxKind syntax_kind() const {
+    return FunctionSyntaxKindBits::decode(bit_field_);
   }
   FunctionKind kind() const;
 
@@ -2354,6 +2350,8 @@ class FunctionLiteral final : public Expression {
 
   bool requires_brand_initialization() const;
 
+  bool private_name_lookup_skips_outer_class() const;
+
   ProducedPreparseData* produced_preparse_data() const {
     return produced_preparse_data_;
   }
@@ -2365,7 +2363,7 @@ class FunctionLiteral final : public Expression {
                   AstValueFactory* ast_value_factory, DeclarationScope* scope,
                   const ScopedPtrList<Statement>& body,
                   int expected_property_count, int parameter_count,
-                  int function_length, FunctionType function_type,
+                  int function_length, FunctionSyntaxKind function_syntax_kind,
                   ParameterFlag has_duplicate_parameters,
                   EagerCompileHint eager_compile_hint, int position,
                   bool has_braces, int function_literal_id,
@@ -2382,19 +2380,21 @@ class FunctionLiteral final : public Expression {
         body_(0, nullptr),
         raw_inferred_name_(ast_value_factory->empty_cons_string()),
         produced_preparse_data_(produced_preparse_data) {
-    bit_field_ |=
-        FunctionTypeBits::encode(function_type) | Pretenure::encode(false) |
-        HasDuplicateParameters::encode(has_duplicate_parameters ==
-                                       kHasDuplicateParameters) |
-        DontOptimizeReasonField::encode(BailoutReason::kNoReason) |
-        RequiresInstanceMembersInitializer::encode(false) |
-        HasBracesField::encode(has_braces) | OneshotIIFEBit::encode(false);
+    bit_field_ |= FunctionSyntaxKindBits::encode(function_syntax_kind) |
+                  Pretenure::encode(false) |
+                  HasDuplicateParameters::encode(has_duplicate_parameters ==
+                                                 kHasDuplicateParameters) |
+                  DontOptimizeReasonField::encode(BailoutReason::kNoReason) |
+                  RequiresInstanceMembersInitializer::encode(false) |
+                  HasBracesField::encode(has_braces) |
+                  OneshotIIFEBit::encode(false);
     if (eager_compile_hint == kShouldEagerCompile) SetShouldEagerCompile();
     body.CopyTo(&body_, zone);
   }
 
-  using FunctionTypeBits = Expression::NextBitField<FunctionType, 3>;
-  using Pretenure = FunctionTypeBits::Next<bool, 1>;
+  using FunctionSyntaxKindBits =
+      Expression::NextBitField<FunctionSyntaxKind, 3>;
+  using Pretenure = FunctionSyntaxKindBits::Next<bool, 1>;
   using HasDuplicateParameters = Pretenure::Next<bool, 1>;
   using DontOptimizeReasonField =
       HasDuplicateParameters::Next<BailoutReason, 8>;
@@ -2490,10 +2490,10 @@ class ClassLiteral final : public Expression {
   using Property = ClassLiteralProperty;
 
   ClassScope* scope() const { return scope_; }
-  Variable* class_variable() const { return class_variable_; }
   Expression* extends() const { return extends_; }
   FunctionLiteral* constructor() const { return constructor_; }
-  ZonePtrList<Property>* properties() const { return properties_; }
+  ZonePtrList<Property>* public_members() const { return public_members_; }
+  ZonePtrList<Property>* private_members() const { return private_members_; }
   int start_position() const { return position(); }
   int end_position() const { return end_position_; }
   bool has_name_static_property() const {
@@ -2505,6 +2505,9 @@ class ClassLiteral final : public Expression {
 
   bool is_anonymous_expression() const {
     return IsAnonymousExpression::decode(bit_field_);
+  }
+  bool has_private_methods() const {
+    return HasPrivateMethods::decode(bit_field_);
   }
   bool IsAnonymousFunctionDefinition() const {
     return is_anonymous_expression();
@@ -2521,39 +2524,43 @@ class ClassLiteral final : public Expression {
  private:
   friend class AstNodeFactory;
 
-  ClassLiteral(ClassScope* scope, Variable* class_variable, Expression* extends,
-               FunctionLiteral* constructor, ZonePtrList<Property>* properties,
+  ClassLiteral(ClassScope* scope, Expression* extends,
+               FunctionLiteral* constructor,
+               ZonePtrList<Property>* public_members,
+               ZonePtrList<Property>* private_members,
                FunctionLiteral* static_fields_initializer,
                FunctionLiteral* instance_members_initializer_function,
                int start_position, int end_position,
                bool has_name_static_property, bool has_static_computed_names,
-               bool is_anonymous)
+               bool is_anonymous, bool has_private_methods)
       : Expression(start_position, kClassLiteral),
         end_position_(end_position),
         scope_(scope),
-        class_variable_(class_variable),
         extends_(extends),
         constructor_(constructor),
-        properties_(properties),
+        public_members_(public_members),
+        private_members_(private_members),
         static_fields_initializer_(static_fields_initializer),
         instance_members_initializer_function_(
             instance_members_initializer_function) {
     bit_field_ |= HasNameStaticProperty::encode(has_name_static_property) |
                   HasStaticComputedNames::encode(has_static_computed_names) |
-                  IsAnonymousExpression::encode(is_anonymous);
+                  IsAnonymousExpression::encode(is_anonymous) |
+                  HasPrivateMethods::encode(has_private_methods);
   }
 
   int end_position_;
   ClassScope* scope_;
-  Variable* class_variable_;
   Expression* extends_;
   FunctionLiteral* constructor_;
-  ZonePtrList<Property>* properties_;
+  ZonePtrList<Property>* public_members_;
+  ZonePtrList<Property>* private_members_;
   FunctionLiteral* static_fields_initializer_;
   FunctionLiteral* instance_members_initializer_function_;
   using HasNameStaticProperty = Expression::NextBitField<bool, 1>;
   using HasStaticComputedNames = HasNameStaticProperty::Next<bool, 1>;
   using IsAnonymousExpression = HasStaticComputedNames::Next<bool, 1>;
+  using HasPrivateMethods = IsAnonymousExpression::Next<bool, 1>;
 };
 
 
@@ -2894,6 +2901,12 @@ class AstNodeFactory final {
         expression, ReturnStatement::kAsyncReturn, pos, end_position);
   }
 
+  ReturnStatement* NewSyntheticAsyncReturnStatement(
+      Expression* expression, int pos, int end_position = kNoSourcePosition) {
+    return new (zone_) ReturnStatement(
+        expression, ReturnStatement::kSyntheticAsyncReturn, pos, end_position);
+  }
+
   WithStatement* NewWithStatement(Scope* scope,
                                   Expression* expression,
                                   Statement* statement,
@@ -3219,13 +3232,13 @@ class AstNodeFactory final {
       const ScopedPtrList<Statement>& body, int expected_property_count,
       int parameter_count, int function_length,
       FunctionLiteral::ParameterFlag has_duplicate_parameters,
-      FunctionLiteral::FunctionType function_type,
+      FunctionSyntaxKind function_syntax_kind,
       FunctionLiteral::EagerCompileHint eager_compile_hint, int position,
       bool has_braces, int function_literal_id,
       ProducedPreparseData* produced_preparse_data = nullptr) {
     return new (zone_) FunctionLiteral(
         zone_, name, ast_value_factory_, scope, body, expected_property_count,
-        parameter_count, function_length, function_type,
+        parameter_count, function_length, function_syntax_kind,
         has_duplicate_parameters, eager_compile_hint, position, has_braces,
         function_literal_id, produced_preparse_data);
   }
@@ -3239,7 +3252,7 @@ class AstNodeFactory final {
     return new (zone_) FunctionLiteral(
         zone_, ast_value_factory_->empty_string(), ast_value_factory_, scope,
         body, expected_property_count, parameter_count, parameter_count,
-        FunctionLiteral::kAnonymousExpression,
+        FunctionSyntaxKind::kAnonymousExpression,
         FunctionLiteral::kNoDuplicateParameters,
         FunctionLiteral::kShouldLazyCompile, 0, /* has_braces */ false,
         kFunctionLiteralIdTopLevel);
@@ -3253,18 +3266,19 @@ class AstNodeFactory final {
   }
 
   ClassLiteral* NewClassLiteral(
-      ClassScope* scope, Variable* variable, Expression* extends,
-      FunctionLiteral* constructor,
-      ZonePtrList<ClassLiteral::Property>* properties,
+      ClassScope* scope, Expression* extends, FunctionLiteral* constructor,
+      ZonePtrList<ClassLiteral::Property>* public_members,
+      ZonePtrList<ClassLiteral::Property>* private_members,
       FunctionLiteral* static_fields_initializer,
       FunctionLiteral* instance_members_initializer_function,
       int start_position, int end_position, bool has_name_static_property,
-      bool has_static_computed_names, bool is_anonymous) {
+      bool has_static_computed_names, bool is_anonymous,
+      bool has_private_methods) {
     return new (zone_) ClassLiteral(
-        scope, variable, extends, constructor, properties,
+        scope, extends, constructor, public_members, private_members,
         static_fields_initializer, instance_members_initializer_function,
         start_position, end_position, has_name_static_property,
-        has_static_computed_names, is_anonymous);
+        has_static_computed_names, is_anonymous, has_private_methods);
   }
 
   NativeFunctionLiteral* NewNativeFunctionLiteral(const AstRawString* name,

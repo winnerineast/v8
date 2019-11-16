@@ -24,13 +24,6 @@ using VarState = LiftoffAssembler::VarState;
 
 namespace {
 
-#define __ asm_->
-
-#define TRACE(...)                                            \
-  do {                                                        \
-    if (FLAG_trace_liftoff) PrintF("[liftoff] " __VA_ARGS__); \
-  } while (false)
-
 class StackTransferRecipe {
   struct RegisterMove {
     LiftoffRegister src;
@@ -297,7 +290,7 @@ class StackTransferRecipe {
     // process all remaining moves in that cycle. Repeat for all cycles.
     uint32_t next_spill_slot = asm_->cache_state()->stack_height();
     while (!move_dst_regs_.is_empty()) {
-      // TODO(clemensh): Use an unused register if available.
+      // TODO(clemensb): Use an unused register if available.
       LiftoffRegister dst = move_dst_regs_.GetFirstRegSet();
       RegisterMove* move = register_move(dst);
       LiftoffRegister spill_reg = move->src;
@@ -401,18 +394,18 @@ void InitMergeRegion(LiftoffAssembler::CacheState* state,
     }
     if (!reg) {
       // No free register; make this a stack slot.
-      *target = VarState(source->type());
+      *target = VarState(source->type(), source->offset());
       continue;
     }
     if (reuse_registers) register_reuse_map.Add(source->reg(), *reg);
     state->inc_used(*reg);
-    *target = VarState(source->type(), *reg);
+    *target = VarState(source->type(), *reg, source->offset());
   }
 }
 
 }  // namespace
 
-// TODO(clemensh): Don't copy the full parent state (this makes us N^2).
+// TODO(clemensb): Don't copy the full parent state (this makes us N^2).
 void LiftoffAssembler::CacheState::InitMerge(const CacheState& source,
                                              uint32_t num_locals,
                                              uint32_t arity,
@@ -484,8 +477,6 @@ constexpr AssemblerOptions DefaultLiftoffOptions() {
 
 }  // namespace
 
-// TODO(clemensh): Provide a reasonably sized buffer, based on wasm function
-// size.
 LiftoffAssembler::LiftoffAssembler(std::unique_ptr<AssemblerBuffer> buffer)
     : TurboAssembler(nullptr, DefaultLiftoffOptions(), CodeObjectRequired::kNo,
                      std::move(buffer)) {
@@ -526,7 +517,7 @@ LiftoffRegister LiftoffAssembler::PopToRegister(LiftoffRegList pinned) {
 void LiftoffAssembler::MergeFullStackWith(const CacheState& target,
                                           const CacheState& source) {
   DCHECK_EQ(source.stack_height(), target.stack_height());
-  // TODO(clemensh): Reuse the same StackTransferRecipe object to save some
+  // TODO(clemensb): Reuse the same StackTransferRecipe object to save some
   // allocations.
   StackTransferRecipe transfers(this);
   for (uint32_t i = 0, e = source.stack_height(); i < e; ++i) {
@@ -688,7 +679,7 @@ void LiftoffAssembler::PrepareCall(FunctionSig* sig,
       *target = new_target.gp();
     } else {
       stack_slots.Add(LiftoffAssembler::VarState(LiftoffAssembler::kWasmIntPtr,
-                                                 LiftoffRegister(*target)));
+                                                 LiftoffRegister(*target), 0));
       *target = no_reg;
     }
   }
@@ -858,9 +849,6 @@ std::ostream& operator<<(std::ostream& os, VarState slot) {
   }
   UNREACHABLE();
 }
-
-#undef __
-#undef TRACE
 
 }  // namespace wasm
 }  // namespace internal

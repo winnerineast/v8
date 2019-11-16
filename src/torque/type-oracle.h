@@ -5,6 +5,8 @@
 #ifndef V8_TORQUE_TYPE_ORACLE_H_
 #define V8_TORQUE_TYPE_ORACLE_H_
 
+#include <memory>
+
 #include "src/torque/contextual.h"
 #include "src/torque/declarable.h"
 #include "src/torque/declarations.h"
@@ -19,23 +21,25 @@ class TypeOracle : public ContextualClass<TypeOracle> {
  public:
   static const AbstractType* GetAbstractType(
       const Type* parent, std::string name, bool transient,
-      std::string generated, const AbstractType* non_constexpr_version) {
-    AbstractType* result =
-        new AbstractType(parent, transient, std::move(name),
-                         std::move(generated), non_constexpr_version);
-    Get().nominal_types_.push_back(std::unique_ptr<AbstractType>(result));
+      std::string generated, const AbstractType* non_constexpr_version,
+      MaybeSpecializationKey specialized_from) {
+    auto ptr = std::unique_ptr<AbstractType>(new AbstractType(
+        parent, transient, std::move(name), std::move(generated),
+        non_constexpr_version, specialized_from));
+    const AbstractType* result = ptr.get();
+    Get().nominal_types_.push_back(std::move(ptr));
     if (non_constexpr_version) {
       non_constexpr_version->SetConstexprVersion(result);
     }
     return result;
   }
 
-  static StructType* GetStructType(
-      const std::string& basename,
-      StructType::MaybeSpecializationKey specialized_from) {
-    StructType* result =
-        new StructType(CurrentNamespace(), basename, specialized_from);
-    Get().aggregate_types_.push_back(std::unique_ptr<StructType>(result));
+  static StructType* GetStructType(const StructDeclaration* decl,
+                                   MaybeSpecializationKey specialized_from) {
+    auto ptr = std::unique_ptr<StructType>(
+        new StructType(CurrentNamespace(), decl, specialized_from));
+    StructType* result = ptr.get();
+    Get().aggregate_types_.push_back(std::move(ptr));
     return result;
   }
 
@@ -43,9 +47,10 @@ class TypeOracle : public ContextualClass<TypeOracle> {
                                  ClassFlags flags, const std::string& generates,
                                  ClassDeclaration* decl,
                                  const TypeAlias* alias) {
-    ClassType* result = new ClassType(parent, CurrentNamespace(), name, flags,
-                                      generates, decl, alias);
-    Get().aggregate_types_.push_back(std::unique_ptr<ClassType>(result));
+    std::unique_ptr<ClassType> type(new ClassType(
+        parent, CurrentNamespace(), name, flags, generates, decl, alias));
+    ClassType* result = type.get();
+    Get().aggregate_types_.push_back(std::move(type));
     return result;
   }
 
@@ -63,17 +68,29 @@ class TypeOracle : public ContextualClass<TypeOracle> {
     return result;
   }
 
-  static const StructType* GetGenericStructTypeInstance(
-      GenericStructType* generic_struct, TypeVector arg_types);
+  static const Type* GetGenericTypeInstance(GenericType* generic_type,
+                                            TypeVector arg_types);
 
-  static GenericStructType* GetReferenceGeneric() {
-    return Declarations::LookupUniqueGenericStructType(QualifiedName(
+  static GenericType* GetReferenceGeneric() {
+    return Declarations::LookupUniqueGenericType(QualifiedName(
         {TORQUE_INTERNAL_NAMESPACE_STRING}, REFERENCE_TYPE_STRING));
   }
 
-  static const StructType* GetReferenceType(const Type* referenced_type) {
-    return GetGenericStructTypeInstance(GetReferenceGeneric(),
-                                        {referenced_type});
+  static GenericType* GetSliceGeneric() {
+    return Declarations::LookupUniqueGenericType(
+        QualifiedName({TORQUE_INTERNAL_NAMESPACE_STRING}, SLICE_TYPE_STRING));
+  }
+
+  static GenericType* GetWeakGeneric() {
+    return Declarations::LookupGlobalUniqueGenericType(WEAK_TYPE_STRING);
+  }
+
+  static const Type* GetReferenceType(const Type* referenced_type) {
+    return GetGenericTypeInstance(GetReferenceGeneric(), {referenced_type});
+  }
+
+  static const Type* GetSliceType(const Type* referenced_type) {
+    return GetGenericTypeInstance(GetSliceGeneric(), {referenced_type});
   }
 
   static const std::vector<const BuiltinPointerType*>&
@@ -98,8 +115,9 @@ class TypeOracle : public ContextualClass<TypeOracle> {
 
   static const TopType* GetTopType(std::string reason,
                                    const Type* source_type) {
-    TopType* result = new TopType(std::move(reason), source_type);
-    Get().top_types_.push_back(std::unique_ptr<TopType>(result));
+    std::unique_ptr<TopType> type(new TopType(std::move(reason), source_type));
+    TopType* result = type.get();
+    Get().top_types_.push_back(std::move(type));
     return result;
   }
 
@@ -143,12 +161,20 @@ class TypeOracle : public ContextualClass<TypeOracle> {
     return Get().GetBuiltinType(HEAP_OBJECT_TYPE_STRING);
   }
 
+  static const Type* GetJSAnyType() {
+    return Get().GetBuiltinType(JSANY_TYPE_STRING);
+  }
+
   static const Type* GetJSObjectType() {
     return Get().GetBuiltinType(JSOBJECT_TYPE_STRING);
   }
 
   static const Type* GetTaggedType() {
     return Get().GetBuiltinType(TAGGED_TYPE_STRING);
+  }
+
+  static const Type* GetStrongTaggedType() {
+    return Get().GetBuiltinType(STRONG_TAGGED_TYPE_STRING);
   }
 
   static const Type* GetUninitializedType() {
@@ -232,10 +258,10 @@ class TypeOracle : public ContextualClass<TypeOracle> {
   }
 
   static bool IsImplicitlyConvertableFrom(const Type* to, const Type* from) {
-    for (Generic* from_constexpr :
+    for (GenericCallable* from_constexpr :
          Declarations::LookupGeneric(kFromConstexprMacroName)) {
       if (base::Optional<const Callable*> specialization =
-              from_constexpr->specializations().Get({to, from})) {
+              from_constexpr->GetSpecialization({to, from})) {
         if ((*specialization)->signature().GetExplicitTypes() ==
             TypeVector{from}) {
           return true;
@@ -249,6 +275,10 @@ class TypeOracle : public ContextualClass<TypeOracle> {
 
   static void FinalizeAggregateTypes();
 
+  static size_t FreshTypeId() { return Get().next_type_id_++; }
+
+  static Namespace* CreateGenericTypeInstantiationNamespace();
+
  private:
   const Type* GetBuiltinType(const std::string& name) {
     return Declarations::LookupGlobalType(name);
@@ -260,6 +290,9 @@ class TypeOracle : public ContextualClass<TypeOracle> {
   std::vector<std::unique_ptr<Type>> nominal_types_;
   std::vector<std::unique_ptr<AggregateType>> aggregate_types_;
   std::vector<std::unique_ptr<Type>> top_types_;
+  std::vector<std::unique_ptr<Namespace>>
+      generic_type_instantiation_namespaces_;
+  size_t next_type_id_ = 0;
 };
 
 }  // namespace torque

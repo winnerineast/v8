@@ -301,7 +301,7 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
       // Just encode the stub index. This will be patched when the code
       // is added to the native module and copied into wasm code space.
       __ CallRecordWriteStub(object_, offset_, remembered_set_action,
-                             save_fp_mode, wasm::WasmCode::kWasmRecordWrite);
+                             save_fp_mode, wasm::WasmCode::kRecordWrite);
     } else {
       __ CallRecordWriteStub(object_, offset_, remembered_set_action,
                              save_fp_mode);
@@ -376,9 +376,9 @@ Condition FlagsConditionToCondition(FlagsCondition condition) {
   UNREACHABLE();
 }
 
-void EmitWordLoadPoisoningIfNeeded(
-    CodeGenerator* codegen, InstructionCode opcode, Instruction* instr,
-    Arm64OperandConverter& i) {  // NOLINT(runtime/references)
+void EmitWordLoadPoisoningIfNeeded(CodeGenerator* codegen,
+                                   InstructionCode opcode, Instruction* instr,
+                                   Arm64OperandConverter const& i) {
   const MemoryAccessMode access_mode =
       static_cast<MemoryAccessMode>(MiscField::decode(opcode));
   if (access_mode == kMemoryAccessPoisoned) {
@@ -386,6 +386,36 @@ void EmitWordLoadPoisoningIfNeeded(
     Register poison = value.Is64Bits() ? kSpeculationPoisonRegister
                                        : kSpeculationPoisonRegister.W();
     codegen->tasm()->And(value, value, Operand(poison));
+  }
+}
+
+void EmitMaybePoisonedFPLoad(CodeGenerator* codegen, InstructionCode opcode,
+                             Arm64OperandConverter* i, VRegister output_reg) {
+  const MemoryAccessMode access_mode =
+      static_cast<MemoryAccessMode>(MiscField::decode(opcode));
+  AddressingMode address_mode = AddressingModeField::decode(opcode);
+  if (access_mode == kMemoryAccessPoisoned && address_mode != kMode_Root) {
+    UseScratchRegisterScope temps(codegen->tasm());
+    Register address = temps.AcquireX();
+    switch (address_mode) {
+      case kMode_MRI:  // Fall through.
+      case kMode_MRR:
+        codegen->tasm()->Add(address, i->InputRegister(0), i->InputOperand(1));
+        break;
+      case kMode_Operand2_R_LSL_I:
+        codegen->tasm()->Add(address, i->InputRegister(0),
+                             i->InputOperand2_64(1));
+        break;
+      default:
+        // Note: we don't need poisoning for kMode_Root loads as those loads
+        // target a fixed offset from root register which is set once when
+        // initializing the vm.
+        UNREACHABLE();
+    }
+    codegen->tasm()->And(address, address, Operand(kSpeculationPoisonRegister));
+    codegen->tasm()->Ldr(output_reg, MemOperand(address));
+  } else {
+    codegen->tasm()->Ldr(output_reg, i->MemoryOperand());
   }
 }
 
@@ -499,9 +529,7 @@ void CodeGenerator::AssemblePopArgumentsAdaptorFrame(Register args_reg,
          MemOperand(fp, ArgumentsAdaptorFrameConstants::kLengthOffset));
   __ SmiUntag(caller_args_count_reg);
 
-  ParameterCount callee_args_count(args_reg);
-  __ PrepareForTailCall(callee_args_count, caller_args_count_reg, scratch2,
-                        scratch3);
+  __ PrepareForTailCall(args_reg, caller_args_count_reg, scratch2, scratch3);
   __ bind(&done);
 }
 
@@ -795,7 +823,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       AssembleArchLookupSwitch(instr);
       break;
     case kArchAbortCSAAssert:
-      DCHECK(i.InputRegister(0).is(x1));
+      DCHECK_EQ(i.InputRegister(0), x1);
       {
         // We don't actually want to generate a pile of code for this, so just
         // claim there is a stack frame, without generating one.
@@ -828,9 +856,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchRet:
       AssembleReturn(instr->InputAt(0));
       break;
-    case kArchStackPointer:
-      __ mov(i.OutputRegister(), sp);
-      break;
     case kArchFramePointer:
       __ mov(i.OutputRegister(), fp);
       break;
@@ -842,11 +867,26 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       }
       break;
     case kArchStackPointerGreaterThan: {
+      // Potentially apply an offset to the current stack pointer before the
+      // comparison to consider the size difference of an optimized frame versus
+      // the contained unoptimized frames.
+
+      Register lhs_register = sp;
+      uint32_t offset;
+
+      if (ShouldApplyOffsetToStackCheck(instr, &offset)) {
+        lhs_register = i.TempRegister(0);
+        __ Sub(lhs_register, sp, offset);
+      }
+
       constexpr size_t kValueIndex = 0;
       DCHECK(instr->InputAt(kValueIndex)->IsRegister());
-      __ Cmp(sp, i.InputRegister(kValueIndex));
+      __ Cmp(lhs_register, i.InputRegister(kValueIndex));
       break;
     }
+    case kArchStackCheckOffset:
+      __ Move(i.OutputRegister(), Smi::FromInt(GetStackCheckOffset()));
+      break;
     case kArchTruncateDoubleToI:
       __ TruncateDoubleToI(isolate(), zone(), i.OutputRegister(),
                            i.InputDoubleRegister(0), DetermineStubCallMode());
@@ -1201,6 +1241,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArm64Sxtw:
       __ Sxtw(i.OutputRegister(), i.InputRegister32(0));
       break;
+    case kArm64Sbfx:
+      __ Sbfx(i.OutputRegister(), i.InputRegister(0), i.InputInt6(1),
+              i.InputInt6(2));
+      break;
     case kArm64Sbfx32:
       __ Sbfx(i.OutputRegister32(), i.InputRegister32(0), i.InputInt5(1),
               i.InputInt5(2));
@@ -1383,9 +1427,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArm64Float64Mod: {
       // TODO(turbofan): implement directly.
       FrameScope scope(tasm(), StackFrame::MANUAL);
-      DCHECK(d0.is(i.InputDoubleRegister(0)));
-      DCHECK(d1.is(i.InputDoubleRegister(1)));
-      DCHECK(d0.is(i.OutputDoubleRegister()));
+      DCHECK_EQ(d0, i.InputDoubleRegister(0));
+      DCHECK_EQ(d1, i.InputDoubleRegister(1));
+      DCHECK_EQ(d0, i.OutputDoubleRegister());
       // TODO(turbofan): make sure this saves all relevant registers.
       __ CallCFunction(ExternalReference::mod_two_doubles_operation(), 0, 2);
       break;
@@ -1521,11 +1565,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Umov(i.OutputRegister32(), i.InputFloat64Register(0).V2S(), 1);
       break;
     case kArm64Float64InsertLowWord32:
-      DCHECK(i.OutputFloat64Register().Is(i.InputFloat64Register(0)));
+      DCHECK_EQ(i.OutputFloat64Register(), i.InputFloat64Register(0));
       __ Ins(i.OutputFloat64Register().V2S(), 0, i.InputRegister32(1));
       break;
     case kArm64Float64InsertHighWord32:
-      DCHECK(i.OutputFloat64Register().Is(i.InputFloat64Register(0)));
+      DCHECK_EQ(i.OutputFloat64Register(), i.InputFloat64Register(0));
       __ Ins(i.OutputFloat64Register().V2S(), 1, i.InputRegister32(1));
       break;
     case kArm64Float64MoveU64:
@@ -1589,6 +1633,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArm64Str:
       __ Str(i.InputOrZeroRegister64(0), i.MemoryOperand(1));
       break;
+    case kArm64StrCompressTagged:
+      __ StoreTaggedField(i.InputOrZeroRegister64(0), i.MemoryOperand(1));
+      break;
     case kArm64DecompressSigned: {
       __ DecompressTaggedSigned(i.OutputRegister(), i.InputRegister(0));
       break;
@@ -1601,20 +1648,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ DecompressAnyTagged(i.OutputRegister(), i.InputRegister(0));
       break;
     }
-    case kArm64CompressSigned:   // Fall through.
-    case kArm64CompressPointer:  // Fall through.
-    case kArm64CompressAny: {
-      __ Uxtw(i.OutputRegister(), i.InputRegister(0));
-      break;
-    }
     case kArm64LdrS:
-      __ Ldr(i.OutputDoubleRegister().S(), i.MemoryOperand());
+      EmitMaybePoisonedFPLoad(this, opcode, &i, i.OutputDoubleRegister().S());
       break;
     case kArm64StrS:
       __ Str(i.InputFloat32OrZeroRegister(0), i.MemoryOperand(1));
       break;
     case kArm64LdrD:
-      __ Ldr(i.OutputDoubleRegister(), i.MemoryOperand());
+      EmitMaybePoisonedFPLoad(this, opcode, &i, i.OutputDoubleRegister());
       break;
     case kArm64StrD:
       __ Str(i.InputFloat64OrZeroRegister(0), i.MemoryOperand(1));
@@ -1624,9 +1665,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     case kArm64StrQ:
       __ Str(i.InputSimd128Register(0), i.MemoryOperand(1));
-      break;
-    case kArm64StrCompressTagged:
-      __ StoreTaggedField(i.InputOrZeroRegister64(0), i.MemoryOperand(1));
       break;
     case kArm64DmbIsh:
       __ Dmb(InnerShareable, BarrierAll);
@@ -1783,6 +1821,63 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
              i.InputSimd128Register(1).V##FORMAT()); \
     break;
 
+    case kArm64F64x2Splat: {
+      __ Dup(i.OutputSimd128Register().V2D(), i.InputSimd128Register(0).D(), 0);
+      break;
+    }
+    case kArm64F64x2ExtractLane: {
+      __ Mov(i.OutputSimd128Register().D(), i.InputSimd128Register(0).V2D(),
+             i.InputInt8(1));
+      break;
+    }
+    case kArm64F64x2ReplaceLane: {
+      VRegister dst = i.OutputSimd128Register().V2D(),
+                src1 = i.InputSimd128Register(0).V2D();
+      if (dst != src1) {
+        __ Mov(dst, src1);
+      }
+      __ Mov(dst, i.InputInt8(1), i.InputSimd128Register(2).V2D(), 0);
+      break;
+    }
+      SIMD_UNOP_CASE(kArm64F64x2Abs, Fabs, 2D);
+      SIMD_UNOP_CASE(kArm64F64x2Neg, Fneg, 2D);
+      SIMD_UNOP_CASE(kArm64F64x2Sqrt, Fsqrt, 2D);
+      SIMD_BINOP_CASE(kArm64F64x2Add, Fadd, 2D);
+      SIMD_BINOP_CASE(kArm64F64x2Sub, Fsub, 2D);
+      SIMD_BINOP_CASE(kArm64F64x2Mul, Fmul, 2D);
+      SIMD_BINOP_CASE(kArm64F64x2Div, Fdiv, 2D);
+      SIMD_BINOP_CASE(kArm64F64x2Min, Fmin, 2D);
+      SIMD_BINOP_CASE(kArm64F64x2Max, Fmax, 2D);
+      SIMD_BINOP_CASE(kArm64F64x2Eq, Fcmeq, 2D);
+    case kArm64F64x2Ne: {
+      VRegister dst = i.OutputSimd128Register().V2D();
+      __ Fcmeq(dst, i.InputSimd128Register(0).V2D(),
+               i.InputSimd128Register(1).V2D());
+      __ Mvn(dst, dst);
+      break;
+    }
+    case kArm64F64x2Lt: {
+      __ Fcmgt(i.OutputSimd128Register().V2D(), i.InputSimd128Register(1).V2D(),
+               i.InputSimd128Register(0).V2D());
+      break;
+    }
+    case kArm64F64x2Le: {
+      __ Fcmge(i.OutputSimd128Register().V2D(), i.InputSimd128Register(1).V2D(),
+               i.InputSimd128Register(0).V2D());
+      break;
+    }
+    case kArm64F64x2Qfma: {
+      DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
+      __ Fmla(i.OutputSimd128Register().V2D(), i.InputSimd128Register(1).V2D(),
+              i.InputSimd128Register(2).V2D());
+      break;
+    }
+    case kArm64F64x2Qfms: {
+      DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
+      __ Fmls(i.OutputSimd128Register().V2D(), i.InputSimd128Register(1).V2D(),
+              i.InputSimd128Register(2).V2D());
+      break;
+    }
     case kArm64F32x4Splat: {
       __ Dup(i.OutputSimd128Register().V4S(), i.InputSimd128Register(0).S(), 0);
       break;
@@ -1795,7 +1890,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArm64F32x4ReplaceLane: {
       VRegister dst = i.OutputSimd128Register().V4S(),
                 src1 = i.InputSimd128Register(0).V4S();
-      if (!dst.is(src1)) {
+      if (dst != src1) {
         __ Mov(dst, src1);
       }
       __ Mov(dst, i.InputInt8(1), i.InputSimd128Register(2).V4S(), 0);
@@ -1805,12 +1900,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       SIMD_UNOP_CASE(kArm64F32x4UConvertI32x4, Ucvtf, 4S);
       SIMD_UNOP_CASE(kArm64F32x4Abs, Fabs, 4S);
       SIMD_UNOP_CASE(kArm64F32x4Neg, Fneg, 4S);
+      SIMD_UNOP_CASE(kArm64F32x4Sqrt, Fsqrt, 4S);
       SIMD_UNOP_CASE(kArm64F32x4RecipApprox, Frecpe, 4S);
       SIMD_UNOP_CASE(kArm64F32x4RecipSqrtApprox, Frsqrte, 4S);
       SIMD_BINOP_CASE(kArm64F32x4Add, Fadd, 4S);
       SIMD_BINOP_CASE(kArm64F32x4AddHoriz, Faddp, 4S);
       SIMD_BINOP_CASE(kArm64F32x4Sub, Fsub, 4S);
       SIMD_BINOP_CASE(kArm64F32x4Mul, Fmul, 4S);
+      SIMD_BINOP_CASE(kArm64F32x4Div, Fdiv, 4S);
       SIMD_BINOP_CASE(kArm64F32x4Min, Fmin, 4S);
       SIMD_BINOP_CASE(kArm64F32x4Max, Fmax, 4S);
       SIMD_BINOP_CASE(kArm64F32x4Eq, Fcmeq, 4S);
@@ -1831,6 +1928,18 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                i.InputSimd128Register(0).V4S());
       break;
     }
+    case kArm64F32x4Qfma: {
+      DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
+      __ Fmla(i.OutputSimd128Register().V4S(), i.InputSimd128Register(1).V4S(),
+              i.InputSimd128Register(2).V4S());
+      break;
+    }
+    case kArm64F32x4Qfms: {
+      DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
+      __ Fmls(i.OutputSimd128Register().V4S(), i.InputSimd128Register(1).V4S(),
+              i.InputSimd128Register(2).V4S());
+      break;
+    }
     case kArm64I64x2Splat: {
       __ Dup(i.OutputSimd128Register().V2D(), i.InputRegister64(0));
       break;
@@ -1843,7 +1952,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArm64I64x2ReplaceLane: {
       VRegister dst = i.OutputSimd128Register().V2D(),
                 src1 = i.InputSimd128Register(0).V2D();
-      if (!dst.is(src1)) {
+      if (dst != src1) {
         __ Mov(dst, src1);
       }
       __ Mov(dst, i.InputInt8(1), i.InputRegister64(2));
@@ -1851,15 +1960,21 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
       SIMD_UNOP_CASE(kArm64I64x2Neg, Neg, 2D);
     case kArm64I64x2Shl: {
-      VRegister tmp = i.ToSimd128Register(instr->TempAt(0));
-      __ Dup(tmp.V2D(), i.InputRegister64(1));
+      VRegister tmp = i.TempSimd128Register(0);
+      Register shift = i.TempRegister(1);
+      // Take shift value modulo 64.
+      __ And(shift, i.InputRegister64(1), 63);
+      __ Dup(tmp.V2D(), shift);
       __ Sshl(i.OutputSimd128Register().V2D(), i.InputSimd128Register(0).V2D(),
               tmp.V2D());
       break;
     }
     case kArm64I64x2ShrS: {
-      VRegister tmp = i.ToSimd128Register(instr->TempAt(0));
-      __ Dup(tmp.V2D(), i.InputRegister64(1));
+      VRegister tmp = i.TempSimd128Register(0);
+      Register shift = i.TempRegister(1);
+      // Take shift value modulo 64.
+      __ And(shift, i.InputRegister64(1), 63);
+      __ Dup(tmp.V2D(), shift);
       __ Neg(tmp.V2D(), tmp.V2D());
       __ Sshl(i.OutputSimd128Register().V2D(), i.InputSimd128Register(0).V2D(),
               tmp.V2D());
@@ -1867,6 +1982,65 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
       SIMD_BINOP_CASE(kArm64I64x2Add, Add, 2D);
       SIMD_BINOP_CASE(kArm64I64x2Sub, Sub, 2D);
+    case kArm64I64x2Mul: {
+      UseScratchRegisterScope scope(tasm());
+      VRegister dst = i.OutputSimd128Register();
+      VRegister src1 = i.InputSimd128Register(0);
+      VRegister src2 = i.InputSimd128Register(1);
+      VRegister tmp1 = scope.AcquireSameSizeAs(dst);
+      VRegister tmp2 = scope.AcquireSameSizeAs(dst);
+      VRegister tmp3 = i.ToSimd128Register(instr->TempAt(0));
+
+      // This 2x64-bit multiplication is performed with several 32-bit
+      // multiplications.
+
+      // 64-bit numbers x and y, can be represented as:
+      //   x = a + 2^32(b)
+      //   y = c + 2^32(d)
+
+      // A 64-bit multiplication is:
+      //   x * y = ac + 2^32(ad + bc) + 2^64(bd)
+      // note: `2^64(bd)` can be ignored, the value is too large to fit in
+      // 64-bits.
+
+      // This sequence implements a 2x64bit multiply, where the registers
+      // `src1` and `src2` are split up into 32-bit components:
+      //   src1 = |d|c|b|a|
+      //   src2 = |h|g|f|e|
+      //
+      //   src1 * src2 = |cg + 2^32(ch + dg)|ae + 2^32(af + be)|
+
+      // Reverse the 32-bit elements in the 64-bit words.
+      //   tmp2 = |g|h|e|f|
+      __ Rev64(tmp2.V4S(), src2.V4S());
+
+      // Calculate the high half components.
+      //   tmp2 = |dg|ch|be|af|
+      __ Mul(tmp2.V4S(), tmp2.V4S(), src1.V4S());
+
+      // Extract the low half components of src1.
+      //   tmp1 = |c|a|
+      __ Xtn(tmp1.V2S(), src1.V2D());
+
+      // Sum the respective high half components.
+      //   tmp2 = |dg+ch|be+af||dg+ch|be+af|
+      __ Addp(tmp2.V4S(), tmp2.V4S(), tmp2.V4S());
+
+      // Extract the low half components of src2.
+      //   tmp3 = |g|e|
+      __ Xtn(tmp3.V2S(), src2.V2D());
+
+      // Shift the high half components, into the high half.
+      //   dst = |dg+ch << 32|be+af << 32|
+      __ Shll(dst.V2D(), tmp2.V2S(), 32);
+
+      // Multiply the low components together, and accumulate with the high
+      // half.
+      //   dst = |dst[1] + cg|dst[0] + ae|
+      __ Umlal(dst.V2D(), tmp3.V2S(), tmp1.V2S());
+
+      break;
+    }
       SIMD_BINOP_CASE(kArm64I64x2Eq, Cmeq, 2D);
     case kArm64I64x2Ne: {
       VRegister dst = i.OutputSimd128Register().V2D();
@@ -1878,8 +2052,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       SIMD_BINOP_CASE(kArm64I64x2GtS, Cmgt, 2D);
       SIMD_BINOP_CASE(kArm64I64x2GeS, Cmge, 2D);
     case kArm64I64x2ShrU: {
-      VRegister tmp = i.ToSimd128Register(instr->TempAt(0));
-      __ Dup(tmp.V2D(), i.InputRegister64(1));
+      VRegister tmp = i.TempSimd128Register(0);
+      Register shift = i.TempRegister(1);
+      // Take shift value modulo 64.
+      __ And(shift, i.InputRegister64(1), 63);
+      __ Dup(tmp.V2D(), shift);
       __ Neg(tmp.V2D(), tmp.V2D());
       __ Ushl(i.OutputSimd128Register().V2D(), i.InputSimd128Register(0).V2D(),
               tmp.V2D());
@@ -1899,7 +2076,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArm64I32x4ReplaceLane: {
       VRegister dst = i.OutputSimd128Register().V4S(),
                 src1 = i.InputSimd128Register(0).V4S();
-      if (!dst.is(src1)) {
+      if (dst != src1) {
         __ Mov(dst, src1);
       }
       __ Mov(dst, i.InputInt8(1), i.InputRegister32(2));
@@ -1910,15 +2087,21 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       SIMD_WIDENING_UNOP_CASE(kArm64I32x4SConvertI16x8High, Sxtl2, 4S, 8H);
       SIMD_UNOP_CASE(kArm64I32x4Neg, Neg, 4S);
     case kArm64I32x4Shl: {
-      VRegister tmp = i.ToSimd128Register(instr->TempAt(0));
-      __ Dup(tmp.V4S(), i.InputRegister32(1));
+      VRegister tmp = i.TempSimd128Register(0);
+      Register shift = i.TempRegister32(1);
+      // Take shift value modulo 32.
+      __ And(shift, i.InputRegister32(1), 31);
+      __ Dup(tmp.V4S(), shift);
       __ Sshl(i.OutputSimd128Register().V4S(), i.InputSimd128Register(0).V4S(),
               tmp.V4S());
       break;
     }
     case kArm64I32x4ShrS: {
-      VRegister tmp = i.ToSimd128Register(instr->TempAt(0));
-      __ Dup(tmp.V4S(), i.InputRegister32(1));
+      VRegister tmp = i.TempSimd128Register(0);
+      Register shift = i.TempRegister32(1);
+      // Take shift value modulo 32.
+      __ And(shift, i.InputRegister32(1), 31);
+      __ Dup(tmp.V4S(), shift);
       __ Neg(tmp.V4S(), tmp.V4S());
       __ Sshl(i.OutputSimd128Register().V4S(), i.InputSimd128Register(0).V4S(),
               tmp.V4S());
@@ -1944,8 +2127,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       SIMD_WIDENING_UNOP_CASE(kArm64I32x4UConvertI16x8Low, Uxtl, 4S, 4H);
       SIMD_WIDENING_UNOP_CASE(kArm64I32x4UConvertI16x8High, Uxtl2, 4S, 8H);
     case kArm64I32x4ShrU: {
-      VRegister tmp = i.ToSimd128Register(instr->TempAt(0));
-      __ Dup(tmp.V4S(), i.InputRegister32(1));
+      VRegister tmp = i.TempSimd128Register(0);
+      Register shift = i.TempRegister32(1);
+      // Take shift value modulo 32.
+      __ And(shift, i.InputRegister32(1), 31);
+      __ Dup(tmp.V4S(), shift);
       __ Neg(tmp.V4S(), tmp.V4S());
       __ Ushl(i.OutputSimd128Register().V4S(), i.InputSimd128Register(0).V4S(),
               tmp.V4S());
@@ -1960,14 +2146,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
     case kArm64I16x8ExtractLane: {
-      __ Smov(i.OutputRegister32(), i.InputSimd128Register(0).V8H(),
+      __ Umov(i.OutputRegister32(), i.InputSimd128Register(0).V8H(),
               i.InputInt8(1));
       break;
     }
     case kArm64I16x8ReplaceLane: {
       VRegister dst = i.OutputSimd128Register().V8H(),
                 src1 = i.InputSimd128Register(0).V8H();
-      if (!dst.is(src1)) {
+      if (dst != src1) {
         __ Mov(dst, src1);
       }
       __ Mov(dst, i.InputInt8(1), i.InputRegister32(2));
@@ -1977,15 +2163,21 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       SIMD_WIDENING_UNOP_CASE(kArm64I16x8SConvertI8x16High, Sxtl2, 8H, 16B);
       SIMD_UNOP_CASE(kArm64I16x8Neg, Neg, 8H);
     case kArm64I16x8Shl: {
-      VRegister tmp = i.ToSimd128Register(instr->TempAt(0));
-      __ Dup(tmp.V8H(), i.InputRegister32(1));
+      VRegister tmp = i.TempSimd128Register(0);
+      Register shift = i.TempRegister32(1);
+      // Take shift value modulo 16.
+      __ And(shift, i.InputRegister32(1), 15);
+      __ Dup(tmp.V8H(), shift);
       __ Sshl(i.OutputSimd128Register().V8H(), i.InputSimd128Register(0).V8H(),
               tmp.V8H());
       break;
     }
     case kArm64I16x8ShrS: {
-      VRegister tmp = i.ToSimd128Register(instr->TempAt(0));
-      __ Dup(tmp.V8H(), i.InputRegister32(1));
+      VRegister tmp = i.TempSimd128Register(0);
+      Register shift = i.TempRegister32(1);
+      // Take shift value modulo 16.
+      __ And(shift, i.InputRegister32(1), 15);
+      __ Dup(tmp.V8H(), shift);
       __ Neg(tmp.V8H(), tmp.V8H());
       __ Sshl(i.OutputSimd128Register().V8H(), i.InputSimd128Register(0).V8H(),
               tmp.V8H());
@@ -1997,7 +2189,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                 src1 = i.InputSimd128Register(1);
       UseScratchRegisterScope scope(tasm());
       VRegister temp = scope.AcquireV(kFormat4S);
-      if (dst.is(src1)) {
+      if (dst == src1) {
         __ Mov(temp, src1.V4S());
         src1 = temp;
       }
@@ -2033,8 +2225,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
     case kArm64I16x8ShrU: {
-      VRegister tmp = i.ToSimd128Register(instr->TempAt(0));
-      __ Dup(tmp.V8H(), i.InputRegister32(1));
+      VRegister tmp = i.TempSimd128Register(0);
+      Register shift = i.TempRegister32(1);
+      // Take shift value modulo 16.
+      __ And(shift, i.InputRegister32(1), 15);
+      __ Dup(tmp.V8H(), shift);
       __ Neg(tmp.V8H(), tmp.V8H());
       __ Ushl(i.OutputSimd128Register().V8H(), i.InputSimd128Register(0).V8H(),
               tmp.V8H());
@@ -2046,7 +2241,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                 src1 = i.InputSimd128Register(1);
       UseScratchRegisterScope scope(tasm());
       VRegister temp = scope.AcquireV(kFormat4S);
-      if (dst.is(src1)) {
+      if (dst == src1) {
         __ Mov(temp, src1.V4S());
         src1 = temp;
       }
@@ -2065,14 +2260,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
     case kArm64I8x16ExtractLane: {
-      __ Smov(i.OutputRegister32(), i.InputSimd128Register(0).V16B(),
+      __ Umov(i.OutputRegister32(), i.InputSimd128Register(0).V16B(),
               i.InputInt8(1));
       break;
     }
     case kArm64I8x16ReplaceLane: {
       VRegister dst = i.OutputSimd128Register().V16B(),
                 src1 = i.InputSimd128Register(0).V16B();
-      if (!dst.is(src1)) {
+      if (dst != src1) {
         __ Mov(dst, src1);
       }
       __ Mov(dst, i.InputInt8(1), i.InputRegister32(2));
@@ -2080,15 +2275,21 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
       SIMD_UNOP_CASE(kArm64I8x16Neg, Neg, 16B);
     case kArm64I8x16Shl: {
-      VRegister tmp = i.ToSimd128Register(instr->TempAt(0));
-      __ Dup(tmp.V16B(), i.InputRegister32(1));
+      VRegister tmp = i.TempSimd128Register(0);
+      Register shift = i.TempRegister32(1);
+      // Take shift value modulo 8.
+      __ And(shift, i.InputRegister32(1), 7);
+      __ Dup(tmp.V16B(), shift);
       __ Sshl(i.OutputSimd128Register().V16B(),
               i.InputSimd128Register(0).V16B(), tmp.V16B());
       break;
     }
     case kArm64I8x16ShrS: {
-      VRegister tmp = i.ToSimd128Register(instr->TempAt(0));
-      __ Dup(tmp.V16B(), i.InputRegister32(1));
+      VRegister tmp = i.TempSimd128Register(0);
+      Register shift = i.TempRegister32(1);
+      // Take shift value modulo 8.
+      __ And(shift, i.InputRegister32(1), 7);
+      __ Dup(tmp.V16B(), shift);
       __ Neg(tmp.V16B(), tmp.V16B());
       __ Sshl(i.OutputSimd128Register().V16B(),
               i.InputSimd128Register(0).V16B(), tmp.V16B());
@@ -2100,7 +2301,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                 src1 = i.InputSimd128Register(1);
       UseScratchRegisterScope scope(tasm());
       VRegister temp = scope.AcquireV(kFormat8H);
-      if (dst.is(src1)) {
+      if (dst == src1) {
         __ Mov(temp, src1.V8H());
         src1 = temp;
       }
@@ -2126,8 +2327,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       SIMD_BINOP_CASE(kArm64I8x16GtS, Cmgt, 16B);
       SIMD_BINOP_CASE(kArm64I8x16GeS, Cmge, 16B);
     case kArm64I8x16ShrU: {
-      VRegister tmp = i.ToSimd128Register(instr->TempAt(0));
-      __ Dup(tmp.V16B(), i.InputRegister32(1));
+      VRegister tmp = i.TempSimd128Register(0);
+      Register shift = i.TempRegister32(1);
+      // Take shift value modulo 8.
+      __ And(shift, i.InputRegister32(1), 7);
+      __ Dup(tmp.V16B(), shift);
       __ Neg(tmp.V16B(), tmp.V16B());
       __ Ushl(i.OutputSimd128Register().V16B(),
               i.InputSimd128Register(0).V16B(), tmp.V16B());
@@ -2139,7 +2343,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                 src1 = i.InputSimd128Register(1);
       UseScratchRegisterScope scope(tasm());
       VRegister temp = scope.AcquireV(kFormat8H);
-      if (dst.is(src1)) {
+      if (dst == src1) {
         __ Mov(temp, src1.V8H());
         src1 = temp;
       }
@@ -2184,7 +2388,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kArm64S128Select: {
       VRegister dst = i.OutputSimd128Register().V16B();
-      DCHECK(dst.is(i.InputSimd128Register(0).V16B()));
+      DCHECK_EQ(dst, i.InputSimd128Register(0).V16B());
       __ Bsl(dst, i.InputSimd128Register(1).V16B(),
              i.InputSimd128Register(2).V16B());
       break;
@@ -2197,10 +2401,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       // If dst == src0 == src1, then the shuffle is unary and we only use src0.
       UseScratchRegisterScope scope(tasm());
       VRegister temp = scope.AcquireV(kFormat4S);
-      if (dst.is(src0)) {
+      if (dst == src0) {
         __ Mov(temp, src0);
         src0 = temp;
-      } else if (dst.is(src1)) {
+      } else if (dst == src1) {
         __ Mov(temp, src1);
         src1 = temp;
       }
@@ -2241,6 +2445,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
              i.InputSimd128Register(1).V16B(), i.InputInt4(2));
       break;
     }
+    case kArm64S8x16Swizzle: {
+      __ Tbl(i.OutputSimd128Register().V16B(), i.InputSimd128Register(0).V16B(),
+             i.InputSimd128Register(1).V16B());
+      break;
+    }
     case kArm64S8x16Shuffle: {
       Simd128Register dst = i.OutputSimd128Register().V16B(),
                       src0 = i.InputSimd128Register(0).V16B(),
@@ -2248,7 +2457,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       // Unary shuffle table is in src0, binary shuffle table is in src0, src1,
       // which must be consecutive.
       int64_t mask = 0;
-      if (src0.is(src1)) {
+      if (src0 == src1) {
         mask = 0x0F0F0F0F;
       } else {
         mask = 0x1F1F1F1F;
@@ -2262,7 +2471,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       VRegister temp = scope.AcquireV(kFormat16B);
       __ Movi(temp, imm2, imm1);
 
-      if (src0.is(src1)) {
+      if (src0 == src1) {
         __ Tbl(dst, src0, temp.V16B());
       } else {
         __ Tbl(dst, src0, src1, temp.V16B());

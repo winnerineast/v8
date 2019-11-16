@@ -261,6 +261,7 @@ TEST(ArrowOrAssignmentOp) {
 bool TokenIsBinaryOp(Token::Value token) {
   switch (token) {
     case Token::COMMA:
+    case Token::NULLISH:
     case Token::OR:
     case Token::AND:
 #define T(name, string, precedence) case Token::name:
@@ -1097,7 +1098,7 @@ TEST(ScopeUsesArgumentsSuperThis) {
       }
       if (is_sloppy(scope->language_mode())) {
         CHECK_EQ((source_data[i].expected & EVAL) != 0,
-                 scope->AsDeclarationScope()->calls_sloppy_eval());
+                 scope->AsDeclarationScope()->sloppy_eval_can_extend_vars());
       }
     }
   }
@@ -1505,8 +1506,11 @@ TEST(DiscardFunctionBody) {
         fun = exp->AsObjectLiteral()->properties()->at(0)->value()->
               AsFunctionLiteral();
       } else {
-        fun = exp->AsClassLiteral()->properties()->at(0)->value()->
-              AsFunctionLiteral();
+        fun = exp->AsClassLiteral()
+                  ->public_members()
+                  ->at(0)
+                  ->value()
+                  ->AsFunctionLiteral();
       }
     }
     CHECK(!fun->ShouldEagerCompile());
@@ -1530,6 +1534,7 @@ enum ParserFlag {
   kAllowHarmonyPrivateMethods,
   kAllowHarmonyDynamicImport,
   kAllowHarmonyImportMeta,
+  kAllowHarmonyNullish,
   kAllowHarmonyOptionalChaining,
 };
 
@@ -1546,6 +1551,7 @@ void SetGlobalFlags(base::EnumSet<ParserFlag> flags) {
   i::FLAG_harmony_import_meta = flags.contains(kAllowHarmonyImportMeta);
   i::FLAG_harmony_optional_chaining =
       flags.contains(kAllowHarmonyOptionalChaining);
+  i::FLAG_harmony_nullish = flags.contains(kAllowHarmonyNullish);
 }
 
 void SetParserFlags(i::PreParser* parser, base::EnumSet<ParserFlag> flags) {
@@ -1558,6 +1564,7 @@ void SetParserFlags(i::PreParser* parser, base::EnumSet<ParserFlag> flags) {
       flags.contains(kAllowHarmonyImportMeta));
   parser->set_allow_harmony_optional_chaining(
       flags.contains(kAllowHarmonyOptionalChaining));
+  parser->set_allow_harmony_nullish(flags.contains(kAllowHarmonyNullish));
 }
 
 void TestParserSyncWithFlags(i::Handle<i::String> source,
@@ -2007,6 +2014,41 @@ TEST(OptionalChainingTaggedError) {
   RunParserSyncTest(context_data, statement_data, kError, nullptr, 9, flags, 1,
                     nullptr, 0, false, true, true);
   RunParserSyncTest(context_data, statement_data, kError);
+}
+
+TEST(Nullish) {
+  v8::HandleScope handles(CcTest::isolate());
+  v8::Local<v8::Context> context = v8::Context::New(CcTest::isolate());
+  v8::Context::Scope context_scope(context);
+
+  const char* context_data[][2] = {
+      {"", ""}, {"'use strict';", ""}, {nullptr, nullptr}};
+  const char* statement_data[] = {"a ?? b", "a ?? b ?? c",
+                                  "a ?? b ? c : d"
+                                  "a ?? b ?? c ? d : e",
+                                  nullptr};
+
+  static const ParserFlag flags[] = {kAllowHarmonyNullish};
+  RunParserSyncTest(context_data, statement_data, kSuccess, nullptr, 0, flags,
+                    1, nullptr, 0, false, true, true);
+  RunParserSyncTest(context_data, statement_data, kError);
+}
+
+TEST(NullishNotContained) {
+  v8::HandleScope handles(CcTest::isolate());
+  v8::Local<v8::Context> context = v8::Context::New(CcTest::isolate());
+  v8::Context::Scope context_scope(context);
+
+  const char* context_data[][2] = {
+      {"", ""}, {"'use strict';", ""}, {nullptr, nullptr}};
+  const char* statement_data[] = {"a || b ?? c", "a ?? b || c",
+                                  "a && b ?? c"
+                                  "a ?? b && c",
+                                  nullptr};
+
+  static const ParserFlag flags[] = {kAllowHarmonyNullish};
+  RunParserSyncTest(context_data, statement_data, kError, nullptr, 0, flags, 1,
+                    nullptr, 0, false, true, true);
 }
 
 TEST(ErrorsEvalAndArguments) {
@@ -3569,6 +3611,14 @@ TEST(MaybeAssignedParameters) {
        "g(arg)}"},
       {true, "function f(arg) {g(arg); eval('arguments[0] = 42'); g(arg)}"},
       {true, "function f(arg) {g(arg); g(() => arguments[0] = 42); g(arg)}"},
+
+      // default values
+      {false, "function f({x:arg = 1}) {}"},
+      {true, "function f({x:arg = 1}, {y:b=(arg=2)}) {}"},
+      {true, "function f({x:arg = (arg = 2)}) {}"},
+      {false, "var f = ({x:arg = 1}) => {}"},
+      {true, "var f = ({x:arg = 1}, {y:b=(arg=2)}) => {}"},
+      {true, "var f = ({x:arg = (arg = 2)}) => {}"},
   };
 
   const char* suffix = "; f";
@@ -5618,6 +5668,14 @@ TEST(PrivateMethodsErrors) {
     "set #constructor(test) {}",
     "#constructor() {}",
     "get #constructor() {}",
+
+    "static async *#constructor() {}",
+    "static *#constructor() {}",
+    "static async #constructor() {}",
+    "static set #constructor(test) {}",
+    "static #constructor() {}",
+    "static get #constructor() {}",
+
     nullptr
   };
   // clang-format on
@@ -5827,6 +5885,70 @@ TEST(PrivateMembersWrongAccessNoEarlyErrors) {
 
   static const ParserFlag private_methods[] = {kAllowHarmonyPrivateMethods};
   RunParserSyncTest(context_data, class_body_data, kSuccess, nullptr, 0,
+                    private_methods, arraysize(private_methods));
+}
+
+TEST(PrivateStaticClassMethodsAndAccessorsNoErrors) {
+  // clang-format off
+  // Tests proposed class fields syntax.
+  const char* context_data[][2] = {{"(class {", "});"},
+                                   {"(class extends Base {", "});"},
+                                   {"class C {", "}"},
+                                   {"class C extends Base {", "}"},
+                                   {nullptr, nullptr}};
+  const char* class_body_data[] = {
+    "static #a() { }",
+    "static get #a() { }",
+    "static set #a(val) { }",
+    "static get #a() { } static set #a(val) { }",
+    "static *#a() { }",
+    "static async #a() { }",
+    "static async *#a() { }",
+    nullptr
+  };
+  // clang-format on
+
+  RunParserSyncTest(context_data, class_body_data, kError);
+
+  static const ParserFlag private_methods[] = {kAllowHarmonyPrivateMethods};
+  RunParserSyncTest(context_data, class_body_data, kSuccess, nullptr, 0,
+                    private_methods, arraysize(private_methods));
+}
+
+TEST(PrivateStaticClassMethodsAndAccessorsDuplicateErrors) {
+  // clang-format off
+  // Tests proposed class fields syntax.
+  const char* context_data[][2] = {{"(class {", "});"},
+                                   {"(class extends Base {", "});"},
+                                   {"class C {", "}"},
+                                   {"class C extends Base {", "}"},
+                                   {nullptr, nullptr}};
+  const char* class_body_data[] = {
+    "static get #a() {} static get #a() {}",
+    "static get #a() {} static #a() {}",
+    "static get #a() {} get #a() {}",
+    "static get #a() {} set #a(val) {}",
+    "static get #a() {} #a() {}",
+
+    "static set #a(val) {} static set #a(val) {}",
+    "static set #a(val) {} static #a() {}",
+    "static set #a(val) {} get #a() {}",
+    "static set #a(val) {} set #a(val) {}",
+    "static set #a(val) {} #a() {}",
+
+    "static #a() {} static #a() {}",
+    "static #a() {} #a(val) {}",
+    "static #a() {} set #a(val) {}",
+    "static #a() {} get #a() {}",
+
+    nullptr
+  };
+  // clang-format on
+
+  RunParserSyncTest(context_data, class_body_data, kError);
+
+  static const ParserFlag private_methods[] = {kAllowHarmonyPrivateMethods};
+  RunParserSyncTest(context_data, class_body_data, kError, nullptr, 0,
                     private_methods, arraysize(private_methods));
 }
 
@@ -6168,14 +6290,6 @@ TEST(PrivateStaticClassFieldsErrors) {
 
     "#a; static #a",
     "static #a; #a",
-
-    // TODO(joyee): support static private methods
-    "static #a() { }",
-    "static get #a() { }",
-    "static set #a() { }",
-    "static *#a() { }",
-    "static async #a() { }",
-    "static async *#a() { }",
 
     // ASI
     "static #['a'] = 0\n",

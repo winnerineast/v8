@@ -8,6 +8,7 @@
 #include <cstddef>
 
 #include "src/ast/ast-source-ranges.h"
+#include "src/ast/ast-value-factory.h"
 #include "src/ast/ast.h"
 #include "src/ast/scopes.h"
 #include "src/base/compiler-specific.h"
@@ -166,14 +167,15 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
   friend class i::ParameterDeclarationParsingScope<ParserTypes<Parser>>;
   friend class i::ArrowHeadParsingScope<ParserTypes<Parser>>;
   friend bool v8::internal::parsing::ParseProgram(
-      ParseInfo*, Isolate*, parsing::UpdateStatisticsMode stats_mode);
+      ParseInfo*, Isolate*, parsing::ReportErrorsAndStatisticsMode stats_mode);
   friend bool v8::internal::parsing::ParseFunction(
       ParseInfo*, Handle<SharedFunctionInfo> shared_info, Isolate*,
-      parsing::UpdateStatisticsMode stats_mode);
+      parsing::ReportErrorsAndStatisticsMode stats_mode);
 
   bool AllowsLazyParsingWithoutUnresolvedVariables() const {
-    return scope()->AllowsLazyParsingWithoutUnresolvedVariables(
-        original_scope_);
+    return !MaybeParsingArrowhead() &&
+           scope()->AllowsLazyParsingWithoutUnresolvedVariables(
+               original_scope_);
   }
 
   bool parse_lazily() const { return mode_ == PARSE_LAZILY; }
@@ -273,7 +275,7 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
   Statement* BuildInitializationBlock(DeclarationParsingResult* parsing_result);
   void DeclareLabel(ZonePtrList<const AstRawString>** labels,
                     ZonePtrList<const AstRawString>** own_labels,
-                    VariableProxy* expr);
+                    const AstRawString* label);
   bool ContainsLabel(ZonePtrList<const AstRawString>* labels,
                      const AstRawString* label);
   Expression* RewriteReturn(Expression* return_value, int pos);
@@ -291,7 +293,7 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
   void ParseAndRewriteAsyncGeneratorFunctionBody(
       int pos, FunctionKind kind, ScopedPtrList<Statement>* body);
   void DeclareFunctionNameVar(const AstRawString* function_name,
-                              FunctionLiteral::FunctionType function_type,
+                              FunctionSyntaxKind function_syntax_kind,
                               DeclarationScope* function_scope);
 
   Statement* DeclareFunction(const AstRawString* variable_name,
@@ -300,6 +302,7 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
                              ZonePtrList<const AstRawString>* names);
   Variable* CreateSyntheticContextVariable(const AstRawString* synthetic_name);
   Variable* CreatePrivateNameVariable(ClassScope* scope, VariableMode mode,
+                                      IsStaticFlag is_static_flag,
                                       const AstRawString* name);
   FunctionLiteral* CreateInitializerFunction(
       const char* name, DeclarationScope* scope,
@@ -313,8 +316,8 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
   Statement* DeclareClass(const AstRawString* variable_name, Expression* value,
                           ZonePtrList<const AstRawString>* names,
                           int class_token_pos, int end_pos);
-  void DeclareClassVariable(const AstRawString* name, ClassInfo* class_info,
-                            int class_token_pos);
+  void DeclareClassVariable(ClassScope* scope, const AstRawString* name,
+                            ClassInfo* class_info, int class_token_pos);
   void DeclareClassBrandVariable(ClassScope* scope, ClassInfo* class_info,
                                  int class_token_pos);
   void DeclarePrivateClassMember(ClassScope* scope,
@@ -366,7 +369,7 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
   FunctionLiteral* ParseFunctionLiteral(
       const AstRawString* name, Scanner::Location function_name_location,
       FunctionNameValidity function_name_validity, FunctionKind kind,
-      int function_token_position, FunctionLiteral::FunctionType type,
+      int function_token_position, FunctionSyntaxKind type,
       LanguageMode language_mode,
       ZonePtrList<const AstRawString>* arguments_for_wrapped_function);
 
@@ -418,7 +421,7 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
   // parsing or could not identify an error correctly, meaning the caller needs
   // to fully reparse. In this case it resets the scanner and preparser state.
   bool SkipFunction(const AstRawString* function_name, FunctionKind kind,
-                    FunctionLiteral::FunctionType function_type,
+                    FunctionSyntaxKind function_syntax_kind,
                     DeclarationScope* function_scope, int* num_parameters,
                     int* function_length,
                     ProducedPreparseData** produced_preparsed_scope_data);
@@ -429,7 +432,7 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
 
   void ParseFunction(
       ScopedPtrList<Statement>* body, const AstRawString* function_name,
-      int pos, FunctionKind kind, FunctionLiteral::FunctionType function_type,
+      int pos, FunctionKind kind, FunctionSyntaxKind function_syntax_kind,
       DeclarationScope* function_scope, int* num_parameters,
       int* function_length, bool* has_duplicate_parameters,
       int* expected_property_count, int* suspend_count,
@@ -778,12 +781,12 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
 
   Expression* ExpressionFromLiteral(Token::Value token, int pos);
 
-  V8_INLINE VariableProxy* ExpressionFromPrivateName(ClassScope* class_scope,
-                                                     const AstRawString* name,
-                                                     int start_position) {
+  V8_INLINE VariableProxy* ExpressionFromPrivateName(
+      PrivateNameScopeIterator* private_name_scope, const AstRawString* name,
+      int start_position) {
     VariableProxy* proxy = factory()->ast_node_factory()->NewVariableProxy(
         name, NORMAL_VARIABLE, start_position);
-    class_scope->AddUnresolvedPrivateName(proxy);
+    private_name_scope->AddUnresolvedPrivateName(proxy);
     return proxy;
   }
 

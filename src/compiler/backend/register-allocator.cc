@@ -6,11 +6,12 @@
 
 #include <iomanip>
 
-#include "src/base/adapters.h"
+#include "src/base/iterator.h"
 #include "src/base/small-vector.h"
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/tick-counter.h"
 #include "src/compiler/linkage.h"
+#include "src/compiler/persistent-map.h"
 #include "src/strings/string-stream.h"
 #include "src/utils/vector.h"
 
@@ -78,7 +79,6 @@ int GetByteWidth(MachineRepresentation rep) {
     case MachineRepresentation::kTaggedSigned:
     case MachineRepresentation::kTaggedPointer:
     case MachineRepresentation::kTagged:
-    case MachineRepresentation::kCompressedSigned:
     case MachineRepresentation::kCompressedPointer:
     case MachineRepresentation::kCompressed:
       // TODO(ishell): kTaggedSize once half size locations are supported.
@@ -95,6 +95,209 @@ int GetByteWidth(MachineRepresentation rep) {
 }
 
 }  // namespace
+
+// Represents a set of live virtual registers.
+// Implemented as an adaptive data structure to handle two extremes of usage
+// patterns:
+//
+// 1. Low-ish virtual register counts should use a statically-sized bit vector
+//    for constant-time insertions/lookups and compact memory-representation.
+//    This is expected to be the common case.
+// 2. For high virtual register counts, the set is expected to be very sparsely
+//    populated. In this case, a bit vector would lead to unacceptable memory
+//    overhead (since it reserves O(capacity) memory instead of O(size)), and
+//    we use a set of indices instead. The PersistentMap was chosen for its
+//    memory-efficient add/remove/copy operations.
+//
+// The maximal capacity of the set is determined at construction.
+class LiveSet : public ZoneObject {
+ private:
+  // Switch to a set backing store when this limit is exceeded.
+  // The threshold is fairly arbitrary, picked s.t. benchmarks do not regress.
+  // It should be a good tradeoff between wasted space and fast/simple bit
+  // operations on small bit vectors sizes.
+  static constexpr int kMaxSmallSetSize = 4096;
+
+  // Key k contains a bitvector value that represents indices:
+  //   [ k * kBitsPerSystemPointer, (k + 1) * kBitsPerSystemPointer [
+  using KeyT = int;
+  using ValueT = uintptr_t;
+
+  static constexpr ValueT kDefault = 0;
+
+  using PersistentLiveSet = PersistentMap<KeyT, ValueT>;
+
+  static PersistentLiveSet* NewPersistentLiveSet(Zone* zone) {
+    return new (zone->New(sizeof(PersistentLiveSet)))
+        PersistentLiveSet(zone, kDefault);
+  }
+
+  static constexpr ValueT kOne = static_cast<ValueT>(1);
+  static constexpr int kBitsPerBucket = kBitsPerSystemPointer;
+  static constexpr int MapIndex(int v) { return v / kBitsPerBucket; }
+  static constexpr int BitIndex(int v) { return v % kBitsPerBucket; }
+  static constexpr ValueT BitMask(int v) { return kOne << BitIndex(v); }
+
+ public:
+  LiveSet(int size, Zone* zone)
+      : vector_(size <= kMaxSmallSetSize ? new (zone) BitVector(size, zone)
+                                         : nullptr),
+        map_(size <= kMaxSmallSetSize ? nullptr : NewPersistentLiveSet(zone)) {}
+
+  void Add(int v) {
+    if (is_small()) {
+      vector_->Add(v);
+    } else {
+      ValueT bits = map_->Get(MapIndex(v));
+      map_->Set(MapIndex(v), bits | BitMask(v));
+    }
+  }
+
+  bool Contains(int v) {
+    if (is_small()) return vector_->Contains(v);
+    return ((map_->Get(MapIndex(v)) & BitMask(v)) != 0);
+  }
+
+  void Remove(int v) {
+    if (is_small()) {
+      vector_->Remove(v);
+    } else {
+      ValueT bits = map_->Get(MapIndex(v));
+      if ((bits & BitMask(v)) != 0) {
+        map_->Set(MapIndex(v), bits & ~BitMask(v));
+      }
+      deletions_++;
+      MaybePrune();
+    }
+  }
+
+  void Union(const LiveSet& that) {
+    if (is_small()) {
+      vector_->Union(*that.vector_);
+    } else {
+      DCHECK(!that.is_small());
+
+      // The other map is empty, nothing to do.
+      if (that.map_->begin() == that.map_->end()) return;
+
+      // This map is empty, copy the other map. Note that PersistentMap copies
+      // have only low, constant memory cost.
+      if (map_->begin() == map_->end()) {
+        *map_ = *that.map_;
+        deletions_ = that.deletions_;
+        return;
+      }
+
+      // Both are non-empty.
+      for (const auto& entry : *that.map_) {
+        if (entry.second != 0) {
+          map_->Set(entry.first, map_->Get(entry.first) | entry.second);
+        }
+      }
+    }
+  }
+
+  int Count() const {
+    if (is_small()) return vector_->Count();
+
+    // Slow. Use only for debugging purposes.
+    int count = 0;
+    for (const auto& entry : *map_) {
+      count += base::bits::CountPopulation(entry.second);
+    }
+    return count;
+  }
+
+  class Iterator {
+   private:
+    BitVector empty_vector_;
+
+   public:
+    explicit Iterator(LiveSet* target)
+        : is_small_(target->is_small()),
+          small_it_(is_small_ ? target->vector_ : &empty_vector_),
+          large_it_(is_small_ ? PersistentLiveSet::iterator::end(kDefault)
+                              : target->map_->begin()) {
+      if (!is_small_ && !Done()) {
+        large_bits_ = (*large_it_).second;
+      }
+    }
+    ~Iterator() = default;
+
+    bool Done() const {
+      return is_small_ ? small_it_.Done() : large_it_.is_end();
+    }
+
+    void Advance() {
+      DCHECK(!Done());
+      if (is_small_) {
+        small_it_.Advance();
+      } else {
+        DCHECK_NE(large_bits_, 0);
+
+        // Mask out the lowest set bit.
+        int trailing_zeroes = base::bits::CountTrailingZeros(large_bits_);
+        large_bits_ &= ~(kOne << trailing_zeroes);
+
+        // If the current bitvector is empty, advance to the next non-empty
+        // bitvector.
+        if (large_bits_ == 0) {
+          ++large_it_;
+          large_bits_ = Done() ? 0 : (*large_it_).second;
+        }
+      }
+    }
+
+    int Current() const {
+      if (is_small_) return small_it_.Current();
+      int trailing_zeroes = base::bits::CountTrailingZeros(large_bits_);
+      return (*large_it_).first * kBitsPerBucket + trailing_zeroes;
+    }
+
+   private:
+    const bool is_small_;
+    BitVector::Iterator small_it_;
+    PersistentLiveSet::iterator large_it_;
+    ValueT large_bits_ = 0;
+  };
+
+ private:
+  bool is_small() const { return vector_ != nullptr; }
+
+  void MaybePrune() {
+    DCHECK(!is_small());
+
+    // The PersistentMap data structure never shrinks by itself; deletions are
+    // internally treated as insertions of the kNotPresent value. This becomes
+    // problematic when the data structure begins to drag along more deleted
+    // keys than non-deleted keys. Pruning addresses this by creating a fresh
+    // deep copy of the map after a threshold is reached.
+    //
+    // Note: This is where the adaptive data structure starts to get hacky.
+    // Ideally we'd be able to avoid arbitrary parametrization such as
+    // kMaxDeletions and kMaxSmallSetSize. Maybe it's just a complexity cost we
+    // have to pay.
+
+    // Fairly arbitrary constant, chosen s.t. our tests do not regress.
+    static constexpr uint16_t kMaxDeletionsBeforePrune = 128;
+    if (deletions_ < kMaxDeletionsBeforePrune) return;
+
+    PersistentLiveSet* new_map = NewPersistentLiveSet(map_->zone());
+    for (const auto& entry : *map_) {
+      if (entry.second != 0) new_map->Set(entry.first, entry.second);
+    }
+
+    map_ = new_map;
+    deletions_ = 0;
+  }
+
+  // The decision between backing stores is made once when the LiveSet is
+  // constructed. The chosen backing store is set while the other remains
+  // nullptr.
+  BitVector* const vector_;
+  PersistentLiveSet* map_;
+  uint16_t deletions_ = 0;
+};
 
 class LiveRangeBound {
  public:
@@ -317,7 +520,6 @@ UsePositionHintType UsePosition::HintTypeForOperand(
   switch (op.kind()) {
     case InstructionOperand::CONSTANT:
     case InstructionOperand::IMMEDIATE:
-    case InstructionOperand::EXPLICIT:
       return UsePositionHintType::kNone;
     case InstructionOperand::UNALLOCATED:
       return UsePositionHintType::kUnresolved;
@@ -797,12 +999,13 @@ LifetimePosition LiveRange::NextEndAfter(LifetimePosition position) const {
   return start_search->end();
 }
 
-LifetimePosition LiveRange::NextStartAfter(LifetimePosition position) const {
+LifetimePosition LiveRange::NextStartAfter(LifetimePosition position) {
   UseInterval* start_search = FirstSearchIntervalForPosition(position);
   while (start_search->start() < position) {
     start_search = start_search->next();
   }
-  return start_search->start();
+  next_start_ = start_search->start();
+  return next_start_;
 }
 
 LifetimePosition LiveRange::FirstIntersection(LiveRange* other) const {
@@ -1594,7 +1797,7 @@ RegisterAllocationData::PhiMapValue* RegisterAllocationData::GetPhiMapValueFor(
 
 bool RegisterAllocationData::ExistsUseWithoutDefinition() {
   bool found = false;
-  BitVector::Iterator iterator(live_in_sets()[0]);
+  LiveSet::Iterator iterator(live_in_sets()[0]);
   while (!iterator.Done()) {
     found = true;
     int operand_index = iterator.Current();
@@ -1940,8 +2143,8 @@ void ConstraintBuilder::MeetConstraintsBefore(int instr_index) {
   // Handle fixed input operands of second instruction.
   for (size_t i = 0; i < second->InputCount(); i++) {
     InstructionOperand* input = second->InputAt(i);
-    if (input->IsImmediate() || input->IsExplicit()) {
-      continue;  // Ignore immediates and explicitly reserved registers.
+    if (input->IsImmediate()) {
+      continue;  // Ignore immediates.
     }
     UnallocatedOperand* cur_input = UnallocatedOperand::cast(input);
     if (cur_input->HasFixedPolicy()) {
@@ -2022,23 +2225,23 @@ LiveRangeBuilder::LiveRangeBuilder(RegisterAllocationData* data,
                                    Zone* local_zone)
     : data_(data), phi_hints_(local_zone) {}
 
-BitVector* LiveRangeBuilder::ComputeLiveOut(const InstructionBlock* block,
-                                            RegisterAllocationData* data) {
+LiveSet* LiveRangeBuilder::ComputeLiveOut(const InstructionBlock* block,
+                                          RegisterAllocationData* data) {
   size_t block_index = block->rpo_number().ToSize();
-  BitVector* live_out = data->live_out_sets()[block_index];
+  LiveSet* live_out = data->live_out_sets()[block_index];
   if (live_out == nullptr) {
     // Compute live out for the given block, except not including backward
     // successor edges.
     Zone* zone = data->allocation_zone();
     const InstructionSequence* code = data->code();
 
-    live_out = new (zone) BitVector(code->VirtualRegisterCount(), zone);
+    live_out = new (zone) LiveSet(code->VirtualRegisterCount(), zone);
 
     // Process all successor blocks.
     for (const RpoNumber& succ : block->successors()) {
       // Add values live on entry to the successor.
       if (succ <= block->rpo_number()) continue;
-      BitVector* live_in = data->live_in_sets()[succ.ToSize()];
+      LiveSet* live_in = data->live_in_sets()[succ.ToSize()];
       if (live_in != nullptr) live_out->Union(*live_in);
 
       // All phi input operands corresponding to this successor edge are live
@@ -2056,7 +2259,7 @@ BitVector* LiveRangeBuilder::ComputeLiveOut(const InstructionBlock* block,
 }
 
 void LiveRangeBuilder::AddInitialIntervals(const InstructionBlock* block,
-                                           BitVector* live_out) {
+                                           LiveSet* live_out) {
   // Add an interval that includes the entire block to the live range for
   // each live_out value.
   LifetimePosition start = LifetimePosition::GapFromInstructionIndex(
@@ -2064,7 +2267,7 @@ void LiveRangeBuilder::AddInitialIntervals(const InstructionBlock* block,
   LifetimePosition end = LifetimePosition::InstructionFromInstructionIndex(
                              block->last_instruction_index())
                              .NextStart();
-  BitVector::Iterator iterator(live_out);
+  LiveSet::Iterator iterator(live_out);
   while (!iterator.Done()) {
     int operand_index = iterator.Current();
     TopLevelLiveRange* range = data()->GetOrCreateLiveRangeFor(operand_index);
@@ -2224,7 +2427,7 @@ UsePosition* LiveRangeBuilder::Use(LifetimePosition block_start,
 }
 
 void LiveRangeBuilder::ProcessInstructions(const InstructionBlock* block,
-                                           BitVector* live) {
+                                           LiveSet* live) {
   int block_start = block->first_instruction_index();
   LifetimePosition block_start_position =
       LifetimePosition::GapFromInstructionIndex(block_start);
@@ -2323,8 +2526,8 @@ void LiveRangeBuilder::ProcessInstructions(const InstructionBlock* block,
 
     for (size_t i = 0; i < instr->InputCount(); i++) {
       InstructionOperand* input = instr->InputAt(i);
-      if (input->IsImmediate() || input->IsExplicit()) {
-        continue;  // Ignore immediates and explicitly reserved registers.
+      if (input->IsImmediate()) {
+        continue;  // Ignore immediates.
       }
       LifetimePosition use_pos;
       if (input->IsUnallocated() &&
@@ -2440,7 +2643,7 @@ void LiveRangeBuilder::ProcessInstructions(const InstructionBlock* block,
 }
 
 void LiveRangeBuilder::ProcessPhis(const InstructionBlock* block,
-                                   BitVector* live) {
+                                   LiveSet* live) {
   for (PhiInstruction* phi : block->phis()) {
     // The live range interval already ends at the first instruction of the
     // block.
@@ -2504,10 +2707,10 @@ void LiveRangeBuilder::ProcessPhis(const InstructionBlock* block,
         predecessor_hint_preference |= kNotDeferredBlockPreference;
       }
 
-      // - Prefer hints from allocated (or explicit) operands.
+      // - Prefer hints from allocated operands.
       //
-      // Already-allocated or explicit operands are typically assigned using
-      // the parallel moves on the last instruction. For example:
+      // Already-allocated operands are typically assigned using the parallel
+      // moves on the last instruction. For example:
       //
       //      gap (v101 = [x0|R|w32]) (v100 = v101)
       //      ArchJmp
@@ -2515,7 +2718,7 @@ void LiveRangeBuilder::ProcessPhis(const InstructionBlock* block,
       //    phi: v100 = v101 v102
       //
       // We have already found the END move, so look for a matching START move
-      // from an allocated (or explicit) operand.
+      // from an allocated operand.
       //
       // Note that we cannot simply look up data()->live_ranges()[vreg] here
       // because the live ranges are still being built when this function is
@@ -2527,7 +2730,7 @@ void LiveRangeBuilder::ProcessPhis(const InstructionBlock* block,
         for (MoveOperands* move : *moves) {
           InstructionOperand& to = move->destination();
           if (predecessor_hint->Equals(to)) {
-            if (move->source().IsAllocated() || move->source().IsExplicit()) {
+            if (move->source().IsAllocated()) {
               predecessor_hint_preference |= kMoveIsAllocatedPreference;
             }
             break;
@@ -2562,11 +2765,11 @@ void LiveRangeBuilder::ProcessPhis(const InstructionBlock* block,
 }
 
 void LiveRangeBuilder::ProcessLoopHeader(const InstructionBlock* block,
-                                         BitVector* live) {
+                                         LiveSet* live) {
   DCHECK(block->IsLoopHeader());
   // Add a live range stretching from the first loop instruction to the last
   // for each value live on entry to the header.
-  BitVector::Iterator iterator(live);
+  LiveSet::Iterator iterator(live);
   LifetimePosition start = LifetimePosition::GapFromInstructionIndex(
       block->first_instruction_index());
   LifetimePosition end = LifetimePosition::GapFromInstructionIndex(
@@ -2593,7 +2796,7 @@ void LiveRangeBuilder::BuildLiveRanges() {
     data_->tick_counter()->DoTick();
     InstructionBlock* block =
         code()->InstructionBlockAt(RpoNumber::FromInt(block_id));
-    BitVector* live = ComputeLiveOut(block, data());
+    LiveSet* live = ComputeLiveOut(block, data());
     // Initially consider all live_out values live for the entire block. We
     // will shorten these intervals if necessary.
     AddInitialIntervals(block, live);
@@ -2989,34 +3192,72 @@ LifetimePosition RegisterAllocator::FindOptimalSplitPos(LifetimePosition start,
 }
 
 LifetimePosition RegisterAllocator::FindOptimalSpillingPos(
-    LiveRange* range, LifetimePosition pos) {
+    LiveRange* range, LifetimePosition pos, SpillMode spill_mode,
+    LiveRange** begin_spill_out) {
+  *begin_spill_out = range;
+  // TODO(herhut): Be more clever here as long as we do not move pos out of
+  // deferred code.
+  if (spill_mode == SpillMode::kSpillDeferred) return pos;
   const InstructionBlock* block = GetInstructionBlock(code(), pos.Start());
   const InstructionBlock* loop_header =
       block->IsLoopHeader() ? block : GetContainingLoop(code(), block);
-
   if (loop_header == nullptr) return pos;
 
-  const UsePosition* prev_use =
-      range->PreviousUsePositionRegisterIsBeneficial(pos);
-
-  while (loop_header != nullptr) {
-    // We are going to spill live range inside the loop.
-    // If possible try to move spilling position backwards to loop header.
-    // This will reduce number of memory moves on the back edge.
-    LifetimePosition loop_start = LifetimePosition::GapFromInstructionIndex(
-        loop_header->first_instruction_index());
-
-    if (range->Covers(loop_start)) {
-      if (prev_use == nullptr || prev_use->pos() < loop_start) {
+  if (data()->is_turbo_control_flow_aware_allocation()) {
+    while (loop_header != nullptr) {
+      // We are going to spill live range inside the loop.
+      // If possible try to move spilling position backwards to loop header.
+      // This will reduce number of memory moves on the back edge.
+      LifetimePosition loop_start = LifetimePosition::GapFromInstructionIndex(
+          loop_header->first_instruction_index());
+      auto& loop_header_state =
+          data()->GetSpillState(loop_header->rpo_number());
+      for (LiveRange* live_at_header : loop_header_state) {
+        if (live_at_header->TopLevel() != range->TopLevel() ||
+            !live_at_header->Covers(loop_start) || live_at_header->spilled()) {
+          continue;
+        }
+        LiveRange* check_use = live_at_header;
+        for (; check_use != nullptr && check_use->Start() < pos;
+             check_use = check_use->next()) {
+          UsePosition* next_use =
+              check_use->NextUsePositionRegisterIsBeneficial(loop_start);
+          if (next_use != nullptr && next_use->pos() < pos) {
+            return pos;
+          }
+        }
         // No register beneficial use inside the loop before the pos.
+        *begin_spill_out = live_at_header;
         pos = loop_start;
+        break;
       }
+
+      // Try hoisting out to an outer loop.
+      loop_header = GetContainingLoop(code(), loop_header);
     }
+  } else {
+    const UsePosition* prev_use =
+        range->PreviousUsePositionRegisterIsBeneficial(pos);
 
-    // Try hoisting out to an outer loop.
-    loop_header = GetContainingLoop(code(), loop_header);
+    while (loop_header != nullptr) {
+      // We are going to spill live range inside the loop.
+      // If possible try to move spilling position backwards to loop header
+      // inside the current range. This will reduce number of memory moves on
+      // the back edge.
+      LifetimePosition loop_start = LifetimePosition::GapFromInstructionIndex(
+          loop_header->first_instruction_index());
+
+      if (range->Covers(loop_start)) {
+        if (prev_use == nullptr || prev_use->pos() < loop_start) {
+          // No register beneficial use inside the loop before the pos.
+          pos = loop_start;
+        }
+      }
+
+      // Try hoisting out to an outer loop.
+      loop_header = GetContainingLoop(code(), loop_header);
+    }
   }
-
   return pos;
 }
 
@@ -3057,11 +3298,33 @@ LinearScanAllocator::LinearScanAllocator(RegisterAllocationData* data,
     : RegisterAllocator(data, kind),
       unhandled_live_ranges_(local_zone),
       active_live_ranges_(local_zone),
-      inactive_live_ranges_(local_zone),
+      inactive_live_ranges_(num_registers(), InactiveLiveRangeQueue(local_zone),
+                            local_zone),
       next_active_ranges_change_(LifetimePosition::Invalid()),
       next_inactive_ranges_change_(LifetimePosition::Invalid()) {
   active_live_ranges().reserve(8);
-  inactive_live_ranges().reserve(8);
+}
+
+void LinearScanAllocator::MaybeSpillPreviousRanges(LiveRange* begin_range,
+                                                   LifetimePosition begin_pos,
+                                                   LiveRange* end_range) {
+  // Spill begin_range after begin_pos, then spill every live range of this
+  // virtual register until but excluding end_range.
+  DCHECK(begin_range->Covers(begin_pos));
+  DCHECK_EQ(begin_range->TopLevel(), end_range->TopLevel());
+
+  if (begin_range != end_range) {
+    DCHECK_LE(begin_range->End(), end_range->Start());
+    if (!begin_range->spilled()) {
+      SpillAfter(begin_range, begin_pos, SpillMode::kSpillAtDefinition);
+    }
+    for (LiveRange* range = begin_range->next(); range != end_range;
+         range = range->next()) {
+      if (!range->spilled()) {
+        range->Spill();
+      }
+    }
+  }
 }
 
 void LinearScanAllocator::MaybeUndoPreviousSplit(LiveRange* range) {
@@ -3083,15 +3346,15 @@ void LinearScanAllocator::MaybeUndoPreviousSplit(LiveRange* range) {
   }
 }
 
-void LinearScanAllocator::SpillNotLiveRanges(RangeWithRegisterSet& to_be_live,
+void LinearScanAllocator::SpillNotLiveRanges(RangeWithRegisterSet* to_be_live,
                                              LifetimePosition position,
                                              SpillMode spill_mode) {
   for (auto it = active_live_ranges().begin();
        it != active_live_ranges().end();) {
     LiveRange* active_range = *it;
     TopLevelLiveRange* toplevel = (*it)->TopLevel();
-    auto found = to_be_live.find({toplevel, kUnassignedRegister});
-    if (found == to_be_live.end()) {
+    auto found = to_be_live->find({toplevel, kUnassignedRegister});
+    if (found == to_be_live->end()) {
       // Is not contained in {to_be_live}, spill it.
       // Fixed registers are exempt from this. They might have been
       // added from inactive at the block boundary but we know that
@@ -3147,7 +3410,7 @@ void LinearScanAllocator::SpillNotLiveRanges(RangeWithRegisterSet& to_be_live,
     } else {
       // This range is contained in {to_be_live}, so we can keep it.
       int expected_register = (*found).expected_register;
-      to_be_live.erase(found);
+      to_be_live->erase(found);
       if (expected_register == active_range->assigned_register()) {
         // Was life and in correct register, simply pass through.
         TRACE("Keeping %d:%d in %s\n", toplevel->vreg(),
@@ -3178,31 +3441,22 @@ LiveRange* LinearScanAllocator::AssignRegisterOnReload(LiveRange* range,
   // give reloading registers pecedence. That way we would compute the
   // intersection for the entire future.
   LifetimePosition new_end = range->End();
-  for (const auto inactive : inactive_live_ranges()) {
-    if (kSimpleFPAliasing || !check_fp_aliasing()) {
-      if (inactive->assigned_register() != reg) continue;
-    } else {
-      bool conflict = inactive->assigned_register() == reg;
-      if (!conflict) {
-        int alias_base_index = -1;
-        int aliases = data()->config()->GetAliases(range->representation(), reg,
-                                                   inactive->representation(),
-                                                   &alias_base_index);
-        DCHECK(aliases > 0 || (aliases == 0 && alias_base_index == -1));
-        while (aliases-- && !conflict) {
-          int aliased_reg = alias_base_index + aliases;
-          if (aliased_reg == reg) {
-            conflict = true;
-          }
-        }
-      }
-      if (!conflict) continue;
+  for (int cur_reg = 0; cur_reg < num_registers(); ++cur_reg) {
+    if ((kSimpleFPAliasing || !check_fp_aliasing()) && cur_reg != reg) {
+      continue;
     }
-    for (auto interval = inactive->first_interval(); interval != nullptr;
-         interval = interval->next()) {
-      if (interval->start() > new_end) break;
-      if (interval->end() <= range->Start()) continue;
-      if (new_end > interval->start()) new_end = interval->start();
+    for (const auto cur_inactive : inactive_live_ranges(cur_reg)) {
+      if (!kSimpleFPAliasing && check_fp_aliasing() &&
+          !data()->config()->AreAliases(cur_inactive->representation(), cur_reg,
+                                        range->representation(), reg)) {
+        continue;
+      }
+      for (auto interval = cur_inactive->first_interval(); interval != nullptr;
+           interval = interval->next()) {
+        if (interval->start() > new_end) break;
+        if (interval->end() <= range->Start()) continue;
+        if (new_end > interval->start()) new_end = interval->start();
+      }
     }
   }
   if (new_end != range->End()) {
@@ -3215,8 +3469,8 @@ LiveRange* LinearScanAllocator::AssignRegisterOnReload(LiveRange* range,
   return range;
 }
 
-void LinearScanAllocator::ReloadLiveRanges(RangeWithRegisterSet& to_be_live,
-                                           LifetimePosition position) {
+void LinearScanAllocator::ReloadLiveRanges(
+    RangeWithRegisterSet const& to_be_live, LifetimePosition position) {
   // Assumption: All ranges in {to_be_live} are currently spilled and there are
   // no conflicting registers in the active ranges.
   // The former is ensured by SpillNotLiveRanges, the latter is by construction
@@ -3498,11 +3752,17 @@ void LinearScanAllocator::UpdateDeferredFixedRanges(SpillMode spill_mode,
               Min(updated->End(), next_active_ranges_change_);
         });
       }
-      for (auto inactive : inactive_live_ranges()) {
-        split_conflicting(range, inactive, [this](LiveRange* updated) {
-          next_inactive_ranges_change_ =
-              Min(updated->End(), next_inactive_ranges_change_);
-        });
+      for (int reg = 0; reg < num_registers(); ++reg) {
+        if ((kSimpleFPAliasing || !check_fp_aliasing()) &&
+            reg != range->assigned_register()) {
+          continue;
+        }
+        for (auto inactive : inactive_live_ranges(reg)) {
+          split_conflicting(range, inactive, [this](LiveRange* updated) {
+            next_inactive_ranges_change_ =
+                Min(updated->End(), next_inactive_ranges_change_);
+          });
+        }
       }
     };
     if (mode() == GENERAL_REGISTERS) {
@@ -3540,12 +3800,14 @@ void LinearScanAllocator::UpdateDeferredFixedRanges(SpillMode spill_mode,
     }
   } else {
     // Remove all ranges.
-    for (auto it = inactive_live_ranges().begin();
-         it != inactive_live_ranges().end();) {
-      if ((*it)->TopLevel()->IsDeferredFixed()) {
-        it = inactive_live_ranges().erase(it);
-      } else {
-        ++it;
+    for (int reg = 0; reg < num_registers(); ++reg) {
+      for (auto it = inactive_live_ranges(reg).begin();
+           it != inactive_live_ranges(reg).end();) {
+        if ((*it)->TopLevel()->IsDeferredFixed()) {
+          it = inactive_live_ranges(reg).erase(it);
+        } else {
+          ++it;
+        }
       }
     }
   }
@@ -3576,7 +3838,9 @@ bool LinearScanAllocator::HasNonDeferredPredecessor(InstructionBlock* block) {
 void LinearScanAllocator::AllocateRegisters() {
   DCHECK(unhandled_live_ranges().empty());
   DCHECK(active_live_ranges().empty());
-  DCHECK(inactive_live_ranges().empty());
+  for (int reg = 0; reg < num_registers(); ++reg) {
+    DCHECK(inactive_live_ranges(reg).empty());
+  }
 
   SplitAndSpillRangesDefinedByMemoryOperand();
   data()->ResetSpillState();
@@ -3793,7 +4057,7 @@ void LinearScanAllocator::AllocateRegisters() {
           }
 
           if (!no_change_required) {
-            SpillNotLiveRanges(to_be_live, next_block_boundary, spill_mode);
+            SpillNotLiveRanges(&to_be_live, next_block_boundary, spill_mode);
             ReloadLiveRanges(to_be_live, next_block_boundary);
           }
 
@@ -3881,9 +4145,10 @@ void LinearScanAllocator::AddToActive(LiveRange* range) {
 void LinearScanAllocator::AddToInactive(LiveRange* range) {
   TRACE("Add live range %d:%d to inactive\n", range->TopLevel()->vreg(),
         range->relative_id());
-  inactive_live_ranges().push_back(range);
   next_inactive_ranges_change_ = std::min(
       next_inactive_ranges_change_, range->NextStartAfter(range->Start()));
+  DCHECK(range->HasRegisterAssigned());
+  inactive_live_ranges(range->assigned_register()).insert(range);
 }
 
 void LinearScanAllocator::AddToUnhandled(LiveRange* range) {
@@ -3906,30 +4171,36 @@ ZoneVector<LiveRange*>::iterator LinearScanAllocator::ActiveToHandled(
 ZoneVector<LiveRange*>::iterator LinearScanAllocator::ActiveToInactive(
     const ZoneVector<LiveRange*>::iterator it, LifetimePosition position) {
   LiveRange* range = *it;
-  inactive_live_ranges().push_back(range);
   TRACE("Moving live range %d:%d from active to inactive\n",
         (range)->TopLevel()->vreg(), range->relative_id());
+  LifetimePosition next_active = range->NextStartAfter(position);
   next_inactive_ranges_change_ =
-      std::min(next_inactive_ranges_change_, range->NextStartAfter(position));
+      std::min(next_inactive_ranges_change_, next_active);
+  DCHECK(range->HasRegisterAssigned());
+  inactive_live_ranges(range->assigned_register()).insert(range);
   return active_live_ranges().erase(it);
 }
 
-ZoneVector<LiveRange*>::iterator LinearScanAllocator::InactiveToHandled(
-    ZoneVector<LiveRange*>::iterator it) {
+LinearScanAllocator::InactiveLiveRangeQueue::iterator
+LinearScanAllocator::InactiveToHandled(InactiveLiveRangeQueue::iterator it) {
+  LiveRange* range = *it;
   TRACE("Moving live range %d:%d from inactive to handled\n",
-        (*it)->TopLevel()->vreg(), (*it)->relative_id());
-  return inactive_live_ranges().erase(it);
+        range->TopLevel()->vreg(), range->relative_id());
+  int reg = range->assigned_register();
+  return inactive_live_ranges(reg).erase(it);
 }
 
-ZoneVector<LiveRange*>::iterator LinearScanAllocator::InactiveToActive(
-    ZoneVector<LiveRange*>::iterator it, LifetimePosition position) {
+LinearScanAllocator::InactiveLiveRangeQueue::iterator
+LinearScanAllocator::InactiveToActive(InactiveLiveRangeQueue::iterator it,
+                                      LifetimePosition position) {
   LiveRange* range = *it;
   active_live_ranges().push_back(range);
   TRACE("Moving live range %d:%d from inactive to active\n",
         range->TopLevel()->vreg(), range->relative_id());
   next_active_ranges_change_ =
       std::min(next_active_ranges_change_, range->NextEndAfter(position));
-  return inactive_live_ranges().erase(it);
+  int reg = range->assigned_register();
+  return inactive_live_ranges(reg).erase(it);
 }
 
 void LinearScanAllocator::ForwardStateTo(LifetimePosition position) {
@@ -3952,18 +4223,25 @@ void LinearScanAllocator::ForwardStateTo(LifetimePosition position) {
 
   if (position >= next_inactive_ranges_change_) {
     next_inactive_ranges_change_ = LifetimePosition::MaxPosition();
-    for (auto it = inactive_live_ranges().begin();
-         it != inactive_live_ranges().end();) {
-      LiveRange* cur_inactive = *it;
-      if (cur_inactive->End() <= position) {
-        it = InactiveToHandled(it);
-      } else if (cur_inactive->Covers(position)) {
-        it = InactiveToActive(it, position);
-      } else {
-        next_inactive_ranges_change_ =
-            std::min(next_inactive_ranges_change_,
-                     cur_inactive->NextStartAfter(position));
-        ++it;
+    for (int reg = 0; reg < num_registers(); ++reg) {
+      ZoneVector<LiveRange*> reorder(data()->allocation_zone());
+      for (auto it = inactive_live_ranges(reg).begin();
+           it != inactive_live_ranges(reg).end();) {
+        LiveRange* cur_inactive = *it;
+        if (cur_inactive->End() <= position) {
+          it = InactiveToHandled(it);
+        } else if (cur_inactive->Covers(position)) {
+          it = InactiveToActive(it, position);
+        } else {
+          next_inactive_ranges_change_ =
+              std::min(next_inactive_ranges_change_,
+                       cur_inactive->NextStartAfter(position));
+          it = inactive_live_ranges(reg).erase(it);
+          reorder.push_back(cur_inactive);
+        }
+      }
+      for (LiveRange* range : reorder) {
+        inactive_live_ranges(reg).insert(range);
       }
     }
   }
@@ -4034,31 +4312,34 @@ void LinearScanAllocator::FindFreeRegistersForRange(
     }
   }
 
-  for (LiveRange* cur_inactive : inactive_live_ranges()) {
-    DCHECK(cur_inactive->End() > range->Start());
-    int cur_reg = cur_inactive->assigned_register();
-    // No need to carry out intersections, when this register won't be
-    // interesting to this range anyway.
-    // TODO(mtrofin): extend to aliased ranges, too.
-    if ((kSimpleFPAliasing || !check_fp_aliasing()) &&
-        positions[cur_reg] < range->Start()) {
-      continue;
-    }
-
-    LifetimePosition next_intersection = cur_inactive->FirstIntersection(range);
-    if (!next_intersection.IsValid()) continue;
-    if (kSimpleFPAliasing || !check_fp_aliasing()) {
-      positions[cur_reg] = Min(positions[cur_reg], next_intersection);
-      TRACE("Register %s is free until pos %d (2)\n", RegisterName(cur_reg),
-            Min(positions[cur_reg], next_intersection).value());
-    } else {
-      int alias_base_index = -1;
-      int aliases = data()->config()->GetAliases(
-          cur_inactive->representation(), cur_reg, rep, &alias_base_index);
-      DCHECK(aliases > 0 || (aliases == 0 && alias_base_index == -1));
-      while (aliases--) {
-        int aliased_reg = alias_base_index + aliases;
-        positions[aliased_reg] = Min(positions[aliased_reg], next_intersection);
+  for (int cur_reg = 0; cur_reg < num_regs; ++cur_reg) {
+    for (LiveRange* cur_inactive : inactive_live_ranges(cur_reg)) {
+      DCHECK_GT(cur_inactive->End(), range->Start());
+      CHECK_EQ(cur_inactive->assigned_register(), cur_reg);
+      // No need to carry out intersections, when this register won't be
+      // interesting to this range anyway.
+      // TODO(mtrofin): extend to aliased ranges, too.
+      if ((kSimpleFPAliasing || !check_fp_aliasing()) &&
+          positions[cur_reg] <= cur_inactive->NextStart()) {
+        break;
+      }
+      LifetimePosition next_intersection =
+          cur_inactive->FirstIntersection(range);
+      if (!next_intersection.IsValid()) continue;
+      if (kSimpleFPAliasing || !check_fp_aliasing()) {
+        positions[cur_reg] = std::min(positions[cur_reg], next_intersection);
+        TRACE("Register %s is free until pos %d (2)\n", RegisterName(cur_reg),
+              positions[cur_reg].value());
+      } else {
+        int alias_base_index = -1;
+        int aliases = data()->config()->GetAliases(
+            cur_inactive->representation(), cur_reg, rep, &alias_base_index);
+        DCHECK(aliases > 0 || (aliases == 0 && alias_base_index == -1));
+        while (aliases--) {
+          int aliased_reg = alias_base_index + aliases;
+          positions[aliased_reg] =
+              std::min(positions[aliased_reg], next_intersection);
+        }
       }
     }
   }
@@ -4277,46 +4558,46 @@ void LinearScanAllocator::AllocateBlockedReg(LiveRange* current,
     }
   }
 
-  for (LiveRange* range : inactive_live_ranges()) {
-    DCHECK(range->End() > current->Start());
-    int cur_reg = range->assigned_register();
-    bool is_fixed = range->TopLevel()->IsFixed();
+  for (int cur_reg = 0; cur_reg < num_registers(); ++cur_reg) {
+    for (LiveRange* range : inactive_live_ranges(cur_reg)) {
+      DCHECK(range->End() > current->Start());
+      DCHECK_EQ(range->assigned_register(), cur_reg);
+      bool is_fixed = range->TopLevel()->IsFixed();
 
-    // Don't perform costly intersections if they are guaranteed to not update
-    // block_pos or use_pos.
-    // TODO(mtrofin): extend to aliased ranges, too.
-    if ((kSimpleFPAliasing || !check_fp_aliasing())) {
-      if (is_fixed) {
-        if (block_pos[cur_reg] < range->Start()) continue;
-      } else {
-        if (use_pos[cur_reg] < range->Start()) continue;
+      // Don't perform costly intersections if they are guaranteed to not update
+      // block_pos or use_pos.
+      // TODO(mtrofin): extend to aliased ranges, too.
+      if ((kSimpleFPAliasing || !check_fp_aliasing())) {
+        DCHECK_LE(use_pos[cur_reg], block_pos[cur_reg]);
+        if (block_pos[cur_reg] <= range->NextStart()) break;
+        if (!is_fixed && use_pos[cur_reg] <= range->NextStart()) continue;
       }
-    }
 
-    LifetimePosition next_intersection = range->FirstIntersection(current);
-    if (!next_intersection.IsValid()) continue;
+      LifetimePosition next_intersection = range->FirstIntersection(current);
+      if (!next_intersection.IsValid()) continue;
 
-    if (kSimpleFPAliasing || !check_fp_aliasing()) {
-      if (is_fixed) {
-        block_pos[cur_reg] = Min(block_pos[cur_reg], next_intersection);
-        use_pos[cur_reg] = Min(block_pos[cur_reg], use_pos[cur_reg]);
-      } else {
-        use_pos[cur_reg] = Min(use_pos[cur_reg], next_intersection);
-      }
-    } else {
-      int alias_base_index = -1;
-      int aliases = data()->config()->GetAliases(
-          range->representation(), cur_reg, rep, &alias_base_index);
-      DCHECK(aliases > 0 || (aliases == 0 && alias_base_index == -1));
-      while (aliases--) {
-        int aliased_reg = alias_base_index + aliases;
+      if (kSimpleFPAliasing || !check_fp_aliasing()) {
         if (is_fixed) {
-          block_pos[aliased_reg] =
-              Min(block_pos[aliased_reg], next_intersection);
-          use_pos[aliased_reg] =
-              Min(block_pos[aliased_reg], use_pos[aliased_reg]);
+          block_pos[cur_reg] = Min(block_pos[cur_reg], next_intersection);
+          use_pos[cur_reg] = Min(block_pos[cur_reg], use_pos[cur_reg]);
         } else {
-          use_pos[aliased_reg] = Min(use_pos[aliased_reg], next_intersection);
+          use_pos[cur_reg] = Min(use_pos[cur_reg], next_intersection);
+        }
+      } else {
+        int alias_base_index = -1;
+        int aliases = data()->config()->GetAliases(
+            range->representation(), cur_reg, rep, &alias_base_index);
+        DCHECK(aliases > 0 || (aliases == 0 && alias_base_index == -1));
+        while (aliases--) {
+          int aliased_reg = alias_base_index + aliases;
+          if (is_fixed) {
+            block_pos[aliased_reg] =
+                Min(block_pos[aliased_reg], next_intersection);
+            use_pos[aliased_reg] =
+                Min(block_pos[aliased_reg], use_pos[aliased_reg]);
+          } else {
+            use_pos[aliased_reg] = Min(use_pos[aliased_reg], next_intersection);
+          }
         }
       }
     }
@@ -4407,11 +4688,10 @@ void LinearScanAllocator::SplitAndSpillIntersecting(LiveRange* current,
     }
 
     UsePosition* next_pos = range->NextRegisterPosition(current->Start());
-    // TODO(herhut): Be more clever here as long as we do not move split_pos
-    // out of deferred code.
-    LifetimePosition spill_pos = spill_mode == SpillMode::kSpillDeferred
-                                     ? split_pos
-                                     : FindOptimalSpillingPos(range, split_pos);
+    LiveRange* begin_spill = nullptr;
+    LifetimePosition spill_pos =
+        FindOptimalSpillingPos(range, split_pos, spill_mode, &begin_spill);
+    MaybeSpillPreviousRanges(begin_spill, spill_pos, range);
     if (next_pos == nullptr) {
       SpillAfter(range, spill_pos, spill_mode);
     } else {
@@ -4431,40 +4711,38 @@ void LinearScanAllocator::SplitAndSpillIntersecting(LiveRange* current,
     it = ActiveToHandled(it);
   }
 
-  for (auto it = inactive_live_ranges().begin();
-       it != inactive_live_ranges().end();) {
-    LiveRange* range = *it;
-    DCHECK(range->End() > current->Start());
-    if (range->TopLevel()->IsFixed()) {
-      ++it;
-      continue;
-    }
+  for (int cur_reg = 0; cur_reg < num_registers(); ++cur_reg) {
     if (kSimpleFPAliasing || !check_fp_aliasing()) {
-      if (range->assigned_register() != reg) {
-        ++it;
-        continue;
-      }
-    } else {
-      if (!data()->config()->AreAliases(current->representation(), reg,
-                                        range->representation(),
-                                        range->assigned_register())) {
-        ++it;
-        continue;
-      }
+      if (cur_reg != reg) continue;
     }
-
-    LifetimePosition next_intersection = range->FirstIntersection(current);
-    if (next_intersection.IsValid()) {
-      UsePosition* next_pos = range->NextRegisterPosition(current->Start());
-      if (next_pos == nullptr) {
-        SpillAfter(range, split_pos, spill_mode);
-      } else {
-        next_intersection = Min(next_intersection, next_pos->pos());
-        SpillBetween(range, split_pos, next_intersection, spill_mode);
+    for (auto it = inactive_live_ranges(cur_reg).begin();
+         it != inactive_live_ranges(cur_reg).end();) {
+      LiveRange* range = *it;
+      if (!kSimpleFPAliasing && check_fp_aliasing() &&
+          !data()->config()->AreAliases(current->representation(), reg,
+                                        range->representation(), cur_reg)) {
+        ++it;
+        continue;
       }
-      it = InactiveToHandled(it);
-    } else {
-      ++it;
+      DCHECK(range->End() > current->Start());
+      if (range->TopLevel()->IsFixed()) {
+        ++it;
+        continue;
+      }
+
+      LifetimePosition next_intersection = range->FirstIntersection(current);
+      if (next_intersection.IsValid()) {
+        UsePosition* next_pos = range->NextRegisterPosition(current->Start());
+        if (next_pos == nullptr) {
+          SpillAfter(range, split_pos, spill_mode);
+        } else {
+          next_intersection = Min(next_intersection, next_pos->pos());
+          SpillBetween(range, split_pos, next_intersection, spill_mode);
+        }
+        it = InactiveToHandled(it);
+      } else {
+        ++it;
+      }
     }
   }
 }
@@ -4874,11 +5152,11 @@ bool LiveRangeConnector::CanEagerlyResolveControlFlow(
 void LiveRangeConnector::ResolveControlFlow(Zone* local_zone) {
   // Lazily linearize live ranges in memory for fast lookup.
   LiveRangeFinder finder(data(), local_zone);
-  ZoneVector<BitVector*>& live_in_sets = data()->live_in_sets();
+  ZoneVector<LiveSet*>& live_in_sets = data()->live_in_sets();
   for (const InstructionBlock* block : code()->instruction_blocks()) {
     if (CanEagerlyResolveControlFlow(block)) continue;
-    BitVector* live = live_in_sets[block->rpo_number().ToInt()];
-    BitVector::Iterator iterator(live);
+    LiveSet* live = live_in_sets[block->rpo_number().ToInt()];
+    LiveSet::Iterator iterator(live);
     while (!iterator.Done()) {
       data()->tick_counter()->DoTick();
       int vreg = iterator.Current();

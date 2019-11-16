@@ -37,17 +37,18 @@ class LoadHandler final : public DataHandler {
     kNormal,
     kGlobal,
     kField,
-    kConstant,
+    kConstantFromPrototype,
     kAccessor,
     kNativeDataProperty,
     kApiGetter,
     kApiGetterHolderIsPrototype,
     kInterceptor,
+    kSlow,
     kProxy,
     kNonExistent,
     kModuleExport
   };
-  using KindBits = BitField<Kind, 0, 4>;
+  using KindBits = base::BitField<Kind, 0, 4>;
 
   // Defines whether access rights check should be done on receiver object.
   // Applicable to named property kinds only when loading value from prototype
@@ -113,11 +114,15 @@ class LoadHandler final : public DataHandler {
   // interceptor.
   static inline Handle<Smi> LoadInterceptor(Isolate* isolate);
 
+  // Creates a Smi-handler for loading a property from a object.
+  static inline Handle<Smi> LoadSlow(Isolate* isolate);
+
   // Creates a Smi-handler for loading a field from fast object.
   static inline Handle<Smi> LoadField(Isolate* isolate, FieldIndex field_index);
 
-  // Creates a Smi-handler for loading a constant from fast object.
-  static inline Handle<Smi> LoadConstant(Isolate* isolate, int descriptor);
+  // Creates a Smi-handler for loading a cached constant from fast
+  // prototype object.
+  static inline Handle<Smi> LoadConstantFromPrototype(Isolate* isolate);
 
   // Creates a Smi-handler for calling a getter on a fast object.
   static inline Handle<Smi> LoadAccessor(Isolate* isolate, int descriptor);
@@ -196,12 +201,12 @@ class StoreHandler final : public DataHandler {
     kApiSetterHolderIsPrototype,
     kGlobalProxy,
     kNormal,
+    kInterceptor,
+    kSlow,
     kProxy,
     kKindsNumber  // Keep last
   };
-  using KindBits = BitField<Kind, 0, 4>;
-
-  enum FieldRepresentation { kSmi, kDouble, kHeapObject, kTagged };
+  using KindBits = base::BitField<Kind, 0, 4>;
 
   // Applicable to kGlobalProxy, kProxy kinds.
 
@@ -230,10 +235,10 @@ class StoreHandler final : public DataHandler {
   // Encoding when KindBits contains kField or kTransitionToField.
   //
   using IsInobjectBits = DescriptorBits::Next<bool, 1>;
-  using FieldRepresentationBits = IsInobjectBits::Next<FieldRepresentation, 2>;
+  using RepresentationBits = IsInobjectBits::Next<Representation::Kind, 3>;
   // +1 here is to cover all possible JSObject header sizes.
   using FieldIndexBits =
-      FieldRepresentationBits::Next<unsigned, kDescriptorIndexBitCount + 1>;
+      RepresentationBits::Next<unsigned, kDescriptorIndexBitCount + 1>;
   // Make sure we don't overflow the smi.
   STATIC_ASSERT(FieldIndexBits::kLastUsedBit < kSmiValueSize);
 
@@ -281,6 +286,12 @@ class StoreHandler final : public DataHandler {
 
   // Creates a Smi-handler for storing a property to a slow object.
   static inline Handle<Smi> StoreNormal(Isolate* isolate);
+
+  // Creates a Smi-handler for storing a property to an interceptor.
+  static inline Handle<Smi> StoreInterceptor(Isolate* isolate);
+
+  // Creates a Smi-handler for storing a property.
+  static inline Handle<Smi> StoreSlow(Isolate* isolate);
 
   // Creates a Smi-handler for storing a property on a proxy.
   static inline Handle<Smi> StoreProxy(Isolate* isolate);

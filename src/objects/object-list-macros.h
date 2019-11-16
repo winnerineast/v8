@@ -37,10 +37,11 @@ class LookupIterator;
 class FieldType;
 class Module;
 class SourceTextModuleInfoEntry;
-class MutableHeapNumber;
+class HeapNumber;
 class ObjectHashTable;
 class ObjectTemplateInfo;
 class ObjectVisitor;
+class OSROptimizedCodeCache;
 class PreparseData;
 class PropertyArray;
 class PropertyCell;
@@ -79,6 +80,7 @@ class ZoneForwardList;
   V(AllocationSite)                            \
   V(ArrayList)                                 \
   V(BigInt)                                    \
+  V(BigIntBase)                                \
   V(BigIntWrapper)                             \
   V(ObjectBoilerplateDescription)              \
   V(Boolean)                                   \
@@ -138,12 +140,14 @@ class ZoneForwardList;
   V(JSCollection)                              \
   V(JSCollectionIterator)                      \
   V(JSContextExtensionObject)                  \
+  V(JSCustomElementsObject)                    \
   V(JSDataView)                                \
   V(JSDate)                                    \
   V(JSError)                                   \
   V(JSFinalizationGroup)                       \
   V(JSFinalizationGroupCleanupIterator)        \
   V(JSFunction)                                \
+  V(JSFunctionOrBoundFunction)                 \
   V(JSGeneratorObject)                         \
   V(JSGlobalObject)                            \
   V(JSGlobalProxy)                             \
@@ -158,10 +162,12 @@ class ZoneForwardList;
   V(JSReceiver)                                \
   V(JSRegExp)                                  \
   V(JSRegExpResult)                            \
+  V(JSRegExpResultIndices)                     \
   V(JSRegExpStringIterator)                    \
   V(JSSet)                                     \
   V(JSSetIterator)                             \
   V(JSSloppyArgumentsObject)                   \
+  V(JSSpecialObject)                           \
   V(JSStringIterator)                          \
   V(JSTypedArray)                              \
   V(JSWeakCollection)                          \
@@ -173,7 +179,6 @@ class ZoneForwardList;
   V(MapCache)                                  \
   V(Module)                                    \
   V(Microtask)                                 \
-  V(MutableHeapNumber)                         \
   V(Name)                                      \
   V(NameDictionary)                            \
   V(NativeContext)                             \
@@ -186,7 +191,9 @@ class ZoneForwardList;
   V(OrderedHashMap)                            \
   V(OrderedHashSet)                            \
   V(OrderedNameDictionary)                     \
+  V(OSROptimizedCodeCache)                     \
   V(PreparseData)                              \
+  V(PrimitiveHeapObject)                       \
   V(PromiseReactionJobTask)                    \
   V(PropertyArray)                             \
   V(PropertyCell)                              \
@@ -226,6 +233,7 @@ class ZoneForwardList;
   V(Undetectable)                              \
   V(UniqueName)                                \
   V(WasmExceptionObject)                       \
+  V(WasmExceptionPackage)                      \
   V(WasmGlobalObject)                          \
   V(WasmInstanceObject)                        \
   V(WasmMemoryObject)                          \
@@ -257,9 +265,26 @@ class ZoneForwardList;
 // Logical sub-types of heap objects that don't correspond to a C++ class but
 // represent some specialization in terms of additional constraints.
 #define HEAP_OBJECT_SPECIALIZED_TYPE_LIST(V) \
+  V(AwaitContext)                            \
+  V(BlockContext)                            \
   V(CallableApiObject)                       \
   V(CallableJSProxy)                         \
-  V(NonNullForeign)
+  V(CatchContext)                            \
+  V(DebugEvaluateContext)                    \
+  V(EvalContext)                             \
+  V(FreeSpaceOrFiller)                       \
+  V(FunctionContext)                         \
+  V(JSApiObject)                             \
+  V(JSMapKeyIterator)                        \
+  V(JSMapKeyValueIterator)                   \
+  V(JSMapValueIterator)                      \
+  V(JSSetKeyValueIterator)                   \
+  V(JSSetValueIterator)                      \
+  V(JSSpecialApiObject)                      \
+  V(ModuleContext)                           \
+  V(NonNullForeign)                          \
+  V(ScriptContext)                           \
+  V(WithContext)
 
 #define HEAP_OBJECT_TYPE_LIST(V)    \
   HEAP_OBJECT_ORDINARY_TYPE_LIST(V) \

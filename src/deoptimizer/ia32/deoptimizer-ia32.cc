@@ -61,7 +61,7 @@ void Deoptimizer::GenerateDeoptimizationEntries(MacroAssembler* masm,
   Label context_check;
   __ mov(edi, Operand(ebp, CommonFrameConstants::kContextOrFrameTypeOffset));
   __ JumpIfSmi(edi, &context_check);
-  __ mov(eax, Operand(ebp, JavaScriptFrameConstants::kFunctionOffset));
+  __ mov(eax, Operand(ebp, StandardFrameConstants::kFunctionOffset));
   __ bind(&context_check);
   __ mov(Operand(esp, 0 * kSystemPointerSize), eax);  // Function.
   __ mov(Operand(esp, 1 * kSystemPointerSize),
@@ -203,8 +203,6 @@ Float32 RegisterValues::GetFloatRegister(unsigned n) const {
   return Float32::FromBits(
       static_cast<uint32_t>(double_registers_[n].get_bits()));
 }
-
-bool Deoptimizer::PadTopOfStackRegister() { return false; }
 
 void FrameDescription::SetCallerPc(unsigned offset, intptr_t value) {
   SetFrameSlot(offset, value);

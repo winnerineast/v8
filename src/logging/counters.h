@@ -5,6 +5,8 @@
 #ifndef V8_LOGGING_COUNTERS_H_
 #define V8_LOGGING_COUNTERS_H_
 
+#include <memory>
+
 #include "include/v8.h"
 #include "src/base/atomic-utils.h"
 #include "src/base/optional.h"
@@ -731,6 +733,7 @@ class RuntimeCallTimer final {
   V(ArrayBuffer_Cast)                                      \
   V(ArrayBuffer_Detach)                                    \
   V(ArrayBuffer_New)                                       \
+  V(ArrayBuffer_NewBackingStore)                           \
   V(Array_CloneElementAt)                                  \
   V(Array_New)                                             \
   V(BigInt64Array_New)                                     \
@@ -780,6 +783,7 @@ class RuntimeCallTimer final {
   V(Message_GetStartColumn)                                \
   V(Module_Evaluate)                                       \
   V(Module_InstantiateModule)                              \
+  V(Module_SetSyntheticModuleExport)                       \
   V(NumberObject_New)                                      \
   V(NumberObject_NumberValue)                              \
   V(Object_CallAsConstructor)                              \
@@ -836,6 +840,7 @@ class RuntimeCallTimer final {
   V(Proxy_New)                                             \
   V(RangeError_New)                                        \
   V(ReferenceError_New)                                    \
+  V(RegExp_Exec)                                           \
   V(RegExp_New)                                            \
   V(ScriptCompiler_Compile)                                \
   V(ScriptCompiler_CompileFunctionInContext)               \
@@ -848,6 +853,7 @@ class RuntimeCallTimer final {
   V(Set_Has)                                               \
   V(Set_New)                                               \
   V(SharedArrayBuffer_New)                                 \
+  V(SharedArrayBuffer_NewBackingStore)                     \
   V(String_Concat)                                         \
   V(String_NewExternalOneByte)                             \
   V(String_NewExternalTwoByte)                             \
@@ -1017,16 +1023,13 @@ class RuntimeCallTimer final {
   V(LoadIC_LoadNormalDH)                          \
   V(LoadIC_LoadNormalFromPrototypeDH)             \
   V(LoadIC_NonReceiver)                           \
-  V(LoadIC_Premonomorphic)                        \
   V(LoadIC_SlowStub)                              \
   V(LoadIC_StringLength)                          \
   V(LoadIC_StringWrapperLength)                   \
   V(StoreGlobalIC_SlowStub)                       \
   V(StoreGlobalIC_StoreScriptContextField)        \
-  V(StoreGlobalIC_Premonomorphic)                 \
   V(StoreIC_HandlerCacheHit_Accessor)             \
   V(StoreIC_NonReceiver)                          \
-  V(StoreIC_Premonomorphic)                       \
   V(StoreIC_SlowStub)                             \
   V(StoreIC_StoreAccessorDH)                      \
   V(StoreIC_StoreAccessorOnPrototypeDH)           \
@@ -1169,10 +1172,6 @@ class WorkerThreadRuntimeCallStatsScope final {
 class RuntimeCallTimerScope {
  public:
   inline RuntimeCallTimerScope(Isolate* isolate,
-                               RuntimeCallCounterId counter_id);
-  // This constructor is here just to avoid calling GetIsolate() when the
-  // stats are disabled and the isolate is not directly available.
-  inline RuntimeCallTimerScope(Isolate* isolate, HeapObject heap_object,
                                RuntimeCallCounterId counter_id);
   inline RuntimeCallTimerScope(RuntimeCallStats* stats,
                                RuntimeCallCounterId counter_id) {

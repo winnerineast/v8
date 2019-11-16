@@ -75,7 +75,7 @@ void Deoptimizer::GenerateDeoptimizationEntries(MacroAssembler* masm,
   Label context_check;
   __ Ld(a1, MemOperand(fp, CommonFrameConstants::kContextOrFrameTypeOffset));
   __ JumpIfSmi(a1, &context_check);
-  __ Ld(a0, MemOperand(fp, JavaScriptFrameConstants::kFunctionOffset));
+  __ Ld(a0, MemOperand(fp, StandardFrameConstants::kFunctionOffset));
   __ bind(&context_check);
   __ li(a1, Operand(static_cast<int>(deopt_kind)));
   // a2: bailout id already loaded.
@@ -222,8 +222,6 @@ Float32 RegisterValues::GetFloatRegister(unsigned n) const {
   return Float32::FromBits(
       static_cast<uint32_t>(double_registers_[n].get_bits()));
 }
-
-bool Deoptimizer::PadTopOfStackRegister() { return false; }
 
 void FrameDescription::SetCallerPc(unsigned offset, intptr_t value) {
   SetFrameSlot(offset, value);

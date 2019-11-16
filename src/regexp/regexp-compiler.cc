@@ -5,13 +5,11 @@
 #include "src/regexp/regexp-compiler.h"
 
 #include "src/base/safe_conversions.h"
-#include "src/diagnostics/code-tracer.h"
 #include "src/execution/isolate.h"
 #include "src/objects/objects-inl.h"
 #include "src/regexp/regexp-macro-assembler-arch.h"
 #include "src/regexp/regexp-macro-assembler-tracer.h"
 #include "src/strings/unicode-inl.h"
-#include "src/utils/ostreams.h"
 #include "src/zone/zone-list-inl.h"
 
 #ifdef V8_INTL_SUPPORT
@@ -273,13 +271,7 @@ RegExpCompiler::CompilationResult RegExpCompiler::Assemble(
   Handle<HeapObject> code = macro_assembler_->GetCode(pattern);
   isolate->IncreaseTotalRegexpCodeGenerated(code->Size());
   work_list_ = nullptr;
-#ifdef ENABLE_DISASSEMBLER
-  if (FLAG_print_code && !FLAG_regexp_interpret_all) {
-    CodeTracer::Scope trace_scope(isolate->GetCodeTracer());
-    OFStream os(trace_scope.file());
-    Handle<Code>::cast(code)->Disassemble(pattern->ToCString().get(), os);
-  }
-#endif
+
 #ifdef DEBUG
   if (FLAG_trace_regexp_assembler) {
     delete macro_assembler_;
@@ -733,6 +725,11 @@ static int GetCaseIndependentLetters(Isolate* isolate, uc16 character,
                                      unibrow::uchar* letters,
                                      int letter_length) {
 #ifdef V8_INTL_SUPPORT
+  // Special case for U+017F which has upper case in ASCII range.
+  if (character == 0x017f) {
+    letters[0] = character;
+    return 1;
+  }
   icu::UnicodeSet set;
   set.add(character);
   set = set.closeOver(USET_CASE_INSENSITIVE);
@@ -742,10 +739,18 @@ static int GetCaseIndependentLetters(Isolate* isolate, uc16 character,
     UChar32 start = set.getRangeStart(i);
     UChar32 end = set.getRangeEnd(i);
     CHECK(end - start + items <= letter_length);
-    while (start <= end) {
-      if (one_byte_subject && start > String::kMaxOneByteCharCode) break;
-      letters[items++] = (unibrow::uchar)(start);
-      start++;
+    // Only add to the output if character is not in ASCII range
+    // or the case equivalent character is in ASCII range.
+    // #sec-runtime-semantics-canonicalize-ch
+    // 3.g If the numeric value of ch ≥ 128 and the numeric value of cu < 128,
+    //     return ch.
+    if (!((start >= 128) && (character < 128))) {
+      // No range have start and end span across code point 128.
+      DCHECK((start >= 128) == (end >= 128));
+      for (UChar32 cu = start; cu <= end; cu++) {
+        if (one_byte_subject && cu > String::kMaxOneByteCharCode) break;
+        letters[items++] = (unibrow::uchar)(cu);
+      }
     }
   }
   return items;
@@ -2047,9 +2052,11 @@ void ChoiceNode::GetQuickCheckDetails(QuickCheckDetails* details,
   }
 }
 
+namespace {
+
 // Check for [0-9A-Z_a-z].
-static void EmitWordCheck(RegExpMacroAssembler* assembler, Label* word,
-                          Label* non_word, bool fall_through_on_word) {
+void EmitWordCheck(RegExpMacroAssembler* assembler, Label* word,
+                   Label* non_word, bool fall_through_on_word) {
   if (assembler->CheckSpecialCharacterClass(
           fall_through_on_word ? 'w' : 'W',
           fall_through_on_word ? non_word : word)) {
@@ -2071,24 +2078,32 @@ static void EmitWordCheck(RegExpMacroAssembler* assembler, Label* word,
 
 // Emit the code to check for a ^ in multiline mode (1-character lookbehind
 // that matches newline or the start of input).
-static void EmitHat(RegExpCompiler* compiler, RegExpNode* on_success,
-                    Trace* trace) {
+void EmitHat(RegExpCompiler* compiler, RegExpNode* on_success, Trace* trace) {
   RegExpMacroAssembler* assembler = compiler->macro_assembler();
-  // We will be loading the previous character into the current character
-  // register.
+
+  // We will load the previous character into the current character register.
   Trace new_trace(*trace);
   new_trace.InvalidateCurrentCharacter();
 
+  // A positive (> 0) cp_offset means we've already successfully matched a
+  // non-empty-width part of the pattern, and thus cannot be at or before the
+  // start of the subject string. We can thus skip both at-start and
+  // bounds-checks when loading the one-character lookbehind.
+  const bool may_be_at_or_before_subject_string_start =
+      new_trace.cp_offset() <= 0;
+
   Label ok;
-  if (new_trace.cp_offset() == 0) {
-    // The start of input counts as a newline in this context, so skip to
-    // ok if we are at the start.
-    assembler->CheckAtStart(&ok);
+  if (may_be_at_or_before_subject_string_start) {
+    // The start of input counts as a newline in this context, so skip to ok if
+    // we are at the start.
+    assembler->CheckAtStart(new_trace.cp_offset(), &ok);
   }
-  // We already checked that we are not at the start of input so it must be
-  // OK to load the previous character.
+
+  // If we've already checked that we are not at the start of input, it's okay
+  // to load the previous character without bounds checks.
+  const bool can_skip_bounds_check = !may_be_at_or_before_subject_string_start;
   assembler->LoadCurrentCharacter(new_trace.cp_offset() - 1,
-                                  new_trace.backtrack(), false);
+                                  new_trace.backtrack(), can_skip_bounds_check);
   if (!assembler->CheckSpecialCharacterClass('n', new_trace.backtrack())) {
     // Newline means \n, \r, 0x2028 or 0x2029.
     if (!compiler->one_byte()) {
@@ -2100,6 +2115,8 @@ static void EmitHat(RegExpCompiler* compiler, RegExpNode* on_success,
   assembler->Bind(&ok);
   on_success->Emit(compiler, &new_trace);
 }
+
+}  // namespace
 
 // Emit the code to handle \b and \B (word-boundary or non-word-boundary).
 void AssertionNode::EmitBoundaryCheck(RegExpCompiler* compiler, Trace* trace) {
@@ -2156,21 +2173,30 @@ void AssertionNode::BacktrackIfPrevious(
   Trace new_trace(*trace);
   new_trace.InvalidateCurrentCharacter();
 
-  Label fall_through, dummy;
-
+  Label fall_through;
   Label* non_word = backtrack_if_previous == kIsNonWord ? new_trace.backtrack()
                                                         : &fall_through;
   Label* word = backtrack_if_previous == kIsNonWord ? &fall_through
                                                     : new_trace.backtrack();
 
-  if (new_trace.cp_offset() == 0) {
+  // A positive (> 0) cp_offset means we've already successfully matched a
+  // non-empty-width part of the pattern, and thus cannot be at or before the
+  // start of the subject string. We can thus skip both at-start and
+  // bounds-checks when loading the one-character lookbehind.
+  const bool may_be_at_or_before_subject_string_start =
+      new_trace.cp_offset() <= 0;
+
+  if (may_be_at_or_before_subject_string_start) {
     // The start of input counts as a non-word character, so the question is
     // decided if we are at the start.
-    assembler->CheckAtStart(non_word);
+    assembler->CheckAtStart(new_trace.cp_offset(), non_word);
   }
-  // We already checked that we are not at the start of input so it must be
-  // OK to load the previous character.
-  assembler->LoadCurrentCharacter(new_trace.cp_offset() - 1, &dummy, false);
+
+  // If we've already checked that we are not at the start of input, it's okay
+  // to load the previous character without bounds checks.
+  const bool can_skip_bounds_check = !may_be_at_or_before_subject_string_start;
+  assembler->LoadCurrentCharacter(new_trace.cp_offset() - 1, non_word,
+                                  can_skip_bounds_check);
   EmitWordCheck(assembler, word, non_word, backtrack_if_previous == kIsNonWord);
 
   assembler->Bind(&fall_through);

@@ -15,8 +15,10 @@ namespace internal {
 
 namespace wasm {
 
+struct WasmFeatures;
+
 std::ostream& operator<<(std::ostream& os, const FunctionSig& function);
-bool IsJSCompatibleSignature(const FunctionSig* sig, bool hasBigIntFeature);
+bool IsJSCompatibleSignature(const FunctionSig* sig, const WasmFeatures&);
 
 // Control expressions and blocks.
 #define FOREACH_CONTROL_OPCODE(V)        \
@@ -46,11 +48,11 @@ bool IsJSCompatibleSignature(const FunctionSig* sig, bool hasBigIntFeature);
   V(Drop, 0x1a, _)               \
   V(Select, 0x1b, _)             \
   V(SelectWithType, 0x1c, _)     \
-  V(GetLocal, 0x20, _)           \
-  V(SetLocal, 0x21, _)           \
-  V(TeeLocal, 0x22, _)           \
-  V(GetGlobal, 0x23, _)          \
-  V(SetGlobal, 0x24, _)          \
+  V(LocalGet, 0x20, _)           \
+  V(LocalSet, 0x21, _)           \
+  V(LocalTee, 0x22, _)           \
+  V(GlobalGet, 0x23, _)          \
+  V(GlobalSet, 0x24, _)          \
   V(TableGet, 0x25, _)           \
   V(TableSet, 0x26, _)           \
   V(I32Const, 0x41, _)           \
@@ -394,24 +396,37 @@ bool IsJSCompatibleSignature(const FunctionSig* sig, bool hasBigIntFeature);
   V(I64x2MaxU, 0xfd91, s_ss)             \
   V(F32x4Abs, 0xfd95, s_s)               \
   V(F32x4Neg, 0xfd96, s_s)               \
-  V(F32x4RecipApprox, 0xfd98, s_s)       \
-  V(F32x4RecipSqrtApprox, 0xfd99, s_s)   \
+  V(F32x4Sqrt, 0xfd97, s_s)              \
+  V(F32x4Qfma, 0xfd98, s_sss)            \
+  V(F32x4Qfms, 0xfd99, s_sss)            \
   V(F32x4Add, 0xfd9a, s_ss)              \
   V(F32x4Sub, 0xfd9b, s_ss)              \
   V(F32x4Mul, 0xfd9c, s_ss)              \
+  V(F32x4Div, 0xfd9d, s_ss)              \
   V(F32x4Min, 0xfd9e, s_ss)              \
   V(F32x4Max, 0xfd9f, s_ss)              \
   V(F64x2Abs, 0xfda0, s_s)               \
   V(F64x2Neg, 0xfda1, s_s)               \
+  V(F64x2Sqrt, 0xfda2, s_s)              \
+  V(F64x2Qfma, 0xfda3, s_sss)            \
+  V(F64x2Qfms, 0xfda4, s_sss)            \
   V(F64x2Add, 0xfda5, s_ss)              \
   V(F64x2Sub, 0xfda6, s_ss)              \
   V(F64x2Mul, 0xfda7, s_ss)              \
+  V(F64x2Div, 0xfda8, s_ss)              \
   V(F64x2Min, 0xfda9, s_ss)              \
   V(F64x2Max, 0xfdaa, s_ss)              \
   V(I32x4SConvertF32x4, 0xfdab, s_s)     \
   V(I32x4UConvertF32x4, 0xfdac, s_s)     \
   V(F32x4SConvertI32x4, 0xfdaf, s_s)     \
   V(F32x4UConvertI32x4, 0xfdb0, s_s)     \
+  V(S8x16Swizzle, 0xfdc0, s_ss)          \
+  V(F64x2SConvertI64x2, 0xfdb1, s_s)     \
+  V(F64x2UConvertI64x2, 0xfdb2, s_s)     \
+  V(S8x16LoadSplat, 0xfdc2, s_i)         \
+  V(S16x8LoadSplat, 0xfdc3, s_i)         \
+  V(S32x4LoadSplat, 0xfdc4, s_i)         \
+  V(S64x2LoadSplat, 0xfdc5, s_i)         \
   V(I8x16SConvertI16x8, 0xfdc6, s_ss)    \
   V(I8x16UConvertI16x8, 0xfdc7, s_ss)    \
   V(I16x8SConvertI32x4, 0xfdc8, s_ss)    \
@@ -424,13 +439,19 @@ bool IsJSCompatibleSignature(const FunctionSig* sig, bool hasBigIntFeature);
   V(I32x4SConvertI16x8High, 0xfdcf, s_s) \
   V(I32x4UConvertI16x8Low, 0xfdd0, s_s)  \
   V(I32x4UConvertI16x8High, 0xfdd1, s_s) \
+  V(I16x8Load8x8S, 0xfdd2, s_s)          \
+  V(I16x8Load8x8U, 0xfdd3, s_s)          \
   V(I16x8AddHoriz, 0xfdbd, s_ss)         \
   V(I32x4AddHoriz, 0xfdbe, s_ss)         \
-  V(F32x4AddHoriz, 0xfdbf, s_ss)
+  V(F32x4AddHoriz, 0xfdbf, s_ss)         \
+  V(F32x4RecipApprox, 0xfde0, s_s)       \
+  V(F32x4RecipSqrtApprox, 0xfde1, s_s)
 
 #define FOREACH_SIMD_1_OPERAND_1_PARAM_OPCODE(V) \
-  V(I8x16ExtractLane, 0xfd05, _)                 \
-  V(I16x8ExtractLane, 0xfd09, _)                 \
+  V(I8x16ExtractLaneS, 0xfd05, _)                \
+  V(I8x16ExtractLaneU, 0xfd06, _)                \
+  V(I16x8ExtractLaneS, 0xfd09, _)                \
+  V(I16x8ExtractLaneU, 0xfd0a, _)                \
   V(I32x4ExtractLane, 0xfd0d, _)                 \
   V(I64x2ExtractLane, 0xfd10, _)                 \
   V(F32x4ExtractLane, 0xfd13, _)                 \
@@ -687,6 +708,8 @@ struct WasmInitExpr {
       val.global_index = index;
     } else if (kind == kRefFuncConst) {
       val.function_index = index;
+    } else if (kind == kRefNullConst) {
+      // Nothing to do.
     } else {
       // For the other types, the other initializers should be used.
       UNREACHABLE();

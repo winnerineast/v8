@@ -10,19 +10,40 @@ namespace v8 {
 namespace internal {
 namespace torque {
 
+constexpr char kTqObjectOverrideDecls[] =
+    R"(  std::vector<std::unique_ptr<ObjectProperty>> GetProperties(
+      d::MemoryAccessor accessor) const override;
+  const char* GetName() const override;
+  void Visit(TqObjectVisitor* visitor) const override;
+  bool IsSuperclassOf(const TqObject* other) const override;
+)";
+
+constexpr char kObjectClassListDefinition[] = R"(
+const d::ClassList kObjectClassList {
+  sizeof(kObjectClassNames) / sizeof(const char*),
+  kObjectClassNames,
+};
+)";
+
 namespace {
 void GenerateClassDebugReader(const ClassType& type, std::ostream& h_contents,
-                              std::ostream& cc_contents,
+                              std::ostream& cc_contents, std::ostream& visitor,
+                              std::ostream& class_names,
                               std::unordered_set<const ClassType*>* done) {
   // Make sure each class only gets generated once.
-  if (!type.IsExtern() || !done->insert(&type).second) return;
+  if (!done->insert(&type).second) return;
   const ClassType* super_type = type.GetSuperClass();
 
   // We must emit the classes in dependency order. If the super class hasn't
   // been emitted yet, go handle it first.
   if (super_type != nullptr) {
-    GenerateClassDebugReader(*super_type, h_contents, cc_contents, done);
+    GenerateClassDebugReader(*super_type, h_contents, cc_contents, visitor,
+                             class_names, done);
   }
+
+  // Classes with undefined layout don't grant any particular value here and may
+  // not correspond with actual C++ classes, so skip them.
+  if (type.HasUndefinedLayout()) return;
 
   const std::string name = type.name();
   const std::string super_name =
@@ -31,8 +52,31 @@ void GenerateClassDebugReader(const ClassType& type, std::ostream& h_contents,
   h_contents << " public:\n";
   h_contents << "  inline Tq" << name << "(uintptr_t address) : Tq"
              << super_name << "(address) {}\n";
-  h_contents << "  std::vector<std::unique_ptr<ObjectProperty>> "
-                "GetProperties(d::MemoryAccessor accessor);\n";
+  h_contents << kTqObjectOverrideDecls;
+
+  cc_contents << "\nconst char* Tq" << name << "::GetName() const {\n";
+  cc_contents << "  return \"v8::internal::" << name << "\";\n";
+  cc_contents << "}\n";
+
+  cc_contents << "\nvoid Tq" << name
+              << "::Visit(TqObjectVisitor* visitor) const {\n";
+  cc_contents << "  visitor->Visit" << name << "(this);\n";
+  cc_contents << "}\n";
+
+  cc_contents << "\nbool Tq" << name
+              << "::IsSuperclassOf(const TqObject* other) const {\n";
+  cc_contents
+      << "  return GetName() != other->GetName() && dynamic_cast<const Tq"
+      << name << "*>(other) != nullptr;\n";
+  cc_contents << "}\n";
+
+  visitor << "  virtual void Visit" << name << "(const Tq" << name
+          << "* object) {\n";
+  visitor << "    Visit" << super_name << "(object);\n";
+  visitor << "  }\n";
+
+  class_names << "  \"v8::internal::" << name << "\",\n";
+
   std::stringstream get_props_impl;
 
   for (const Field& field : type.fields()) {
@@ -53,9 +97,10 @@ void GenerateClassDebugReader(const ClassType& type, std::ostream& h_contents,
     if (is_field_tagged) {
       field_value_type = "uintptr_t";
       field_value_type_compressed = "i::Tagged_t";
-      field_cc_type = "v8::internal::" + (field_class_type.has_value()
-                                              ? (*field_class_type)->name()
-                                              : "Object");
+      field_cc_type = "v8::internal::" +
+                      (field_class_type.has_value()
+                           ? (*field_class_type)->GetGeneratedTNodeTypeName()
+                           : "Object");
       field_cc_type_compressed =
           COMPRESS_POINTERS_BOOL ? "v8::internal::TaggedValue" : field_cc_type;
     } else {
@@ -86,40 +131,61 @@ void GenerateClassDebugReader(const ClassType& type, std::ostream& h_contents,
         "Get" + CamelifyString(field_name) + "Address";
 
     std::string indexed_field_info;
+    std::string index_param;
+    std::string index_offset;
     if (field.index) {
-      if ((*field.index)->name_and_type.type != TypeOracle::GetSmiType()) {
-        Error("Non-SMI values are not (yet) supported as indexes.");
+      const Type* index_type = field.index->type;
+      std::string index_type_name;
+      std::string index_value;
+      if (index_type == TypeOracle::GetSmiType()) {
+        index_type_name = "uintptr_t";
+        index_value =
+            "i::PlatformSmiTagging::SmiToInt(indexed_field_count.value)";
+      } else if (!index_type->IsSubtypeOf(TypeOracle::GetTaggedType())) {
+        const Type* constexpr_index = index_type->ConstexprVersion();
+        if (constexpr_index == nullptr) {
+          Error("Type '", index_type->ToString(),
+                "' requires a constexpr representation");
+          continue;
+        }
+        index_type_name = constexpr_index->GetGeneratedTypeName();
+        index_value = "indexed_field_count.value";
+      } else {
+        Error("Unsupported index type: ", index_type);
         continue;
       }
-      get_props_impl << "  Value<uintptr_t> indexed_field_count = Get"
-                     << CamelifyString((*field.index)->name_and_type.name)
+      get_props_impl << "  Value<" << index_type_name
+                     << "> indexed_field_count = Get"
+                     << CamelifyString(field.index->name)
                      << "Value(accessor);\n";
       indexed_field_info =
-          ", i::PlatformSmiTagging::SmiToInt(indexed_field_count.value), "
-          "GetArrayKind(indexed_field_count.validity)";
+          ", " + index_value + ", GetArrayKind(indexed_field_count.validity)";
+      index_param = ", size_t offset";
+      index_offset = " + offset * sizeof(value)";
     }
-    get_props_impl
-        << "  result.push_back(v8::base::make_unique<ObjectProperty>(\""
-        << field_name << "\", \"" << field_cc_type_compressed << "\", \""
-        << field_cc_type << "\", " << address_getter << "()"
-        << indexed_field_info << "));\n";
+    get_props_impl << "  result.push_back(std::make_unique<ObjectProperty>(\""
+                   << field_name << "\", \"" << field_cc_type_compressed
+                   << "\", \"" << field_cc_type << "\", " << address_getter
+                   << "()" << indexed_field_info << "));\n";
 
-    h_contents << "  uintptr_t " << address_getter << "();\n";
+    h_contents << "  uintptr_t " << address_getter << "() const;\n";
     h_contents << "  Value<" << field_value_type << "> " << field_getter
-               << "(d::MemoryAccessor accessor);\n";
+               << "(d::MemoryAccessor accessor " << index_param << ") const;\n";
     cc_contents << "\nuintptr_t Tq" << name << "::" << address_getter
-                << "() {\n";
+                << "() const {\n";
     cc_contents << "  return address_ - i::kHeapObjectTag + " << field.offset
                 << ";\n";
     cc_contents << "}\n";
     cc_contents << "\nValue<" << field_value_type << "> Tq" << name
-                << "::" << field_getter << "(d::MemoryAccessor accessor) {\n";
+                << "::" << field_getter << "(d::MemoryAccessor accessor"
+                << index_param << ") const {\n";
     cc_contents << "  " << field_value_type_compressed << " value{};\n";
     cc_contents << "  d::MemoryAccessResult validity = accessor("
-                << address_getter
-                << "(), reinterpret_cast<uint8_t*>(&value), sizeof(value));\n";
+                << address_getter << "()" << index_offset
+                << ", reinterpret_cast<uint8_t*>(&value), sizeof(value));\n";
     cc_contents << "  return {validity, "
-                << (is_field_tagged ? "Decompress(value, address_)" : "value")
+                << (is_field_tagged ? "EnsureDecompressed(value, address_)"
+                                    : "value")
                 << "};\n";
     cc_contents << "}\n";
   }
@@ -127,7 +193,7 @@ void GenerateClassDebugReader(const ClassType& type, std::ostream& h_contents,
   h_contents << "};\n";
 
   cc_contents << "\nstd::vector<std::unique_ptr<ObjectProperty>> Tq" << name
-              << "::GetProperties(d::MemoryAccessor accessor) {\n";
+              << "::GetProperties(d::MemoryAccessor accessor) const {\n";
   cc_contents << "  std::vector<std::unique_ptr<ObjectProperty>> result = Tq"
               << super_name << "::GetProperties(accessor);\n";
   cc_contents << get_props_impl.str();
@@ -153,6 +219,11 @@ void ImplementationVisitor::GenerateClassDebugReaders(
     h_contents
         << "\n#include \"tools/debug_helper/debug-helper-internal.h\"\n\n";
 
+    h_contents << "// Unset a windgi.h macro that causes conflicts.\n";
+    h_contents << "#ifdef GetBValue\n";
+    h_contents << "#undef GetBValue\n";
+    h_contents << "#endif\n\n";
+
     cc_contents << "#include \"torque-generated/" << file_name << ".h\"\n";
     cc_contents << "#include \"include/v8-internal.h\"\n\n";
     cc_contents << "namespace i = v8::internal;\n\n";
@@ -160,11 +231,27 @@ void ImplementationVisitor::GenerateClassDebugReaders(
     NamespaceScope h_namespaces(h_contents, {"v8_debug_helper_internal"});
     NamespaceScope cc_namespaces(cc_contents, {"v8_debug_helper_internal"});
 
+    std::stringstream visitor;
+    visitor << "\nclass TqObjectVisitor {\n";
+    visitor << " public:\n";
+    visitor << "  virtual void VisitObject(const TqObject* object) {}\n";
+
+    std::stringstream class_names;
+
     std::unordered_set<const ClassType*> done;
     for (const TypeAlias* alias : GlobalContext::GetClasses()) {
       const ClassType* type = ClassType::DynamicCast(alias->type());
-      GenerateClassDebugReader(*type, h_contents, cc_contents, &done);
+      GenerateClassDebugReader(*type, h_contents, cc_contents, visitor,
+                               class_names, &done);
     }
+
+    visitor << "};\n";
+    h_contents << visitor.str();
+
+    cc_contents << "\nconst char* kObjectClassNames[] {\n";
+    cc_contents << class_names.str();
+    cc_contents << "};\n";
+    cc_contents << kObjectClassListDefinition;
   }
   WriteFile(output_directory + "/" + file_name + ".h", h_contents.str());
   WriteFile(output_directory + "/" + file_name + ".cc", cc_contents.str());

@@ -4,6 +4,7 @@
 # found in the LICENSE file.
 
 import os
+import random
 import subprocess
 import sys
 import unittest
@@ -33,17 +34,18 @@ class ConfigTest(unittest.TestCase):
 
     When experiment distribution changes this test might change, too.
     """
-    class Rng(object):
-      def random(self):
-        return 0.5
     self.assertEqual(
         [
           '--first-config=ignition',
-          '--second-config=ignition_turbo',
+          '--second-config=ignition_turbo_opt',
           '--second-d8=d8',
           '--second-config-extra-flags=--stress-scavenge=100',
+          '--second-config-extra-flags=--no-regexp-tier-up',
+          '--second-config-extra-flags=--no-enable-ssse3',
+          '--second-config-extra-flags=--no-enable-bmi2',
+          '--second-config-extra-flags=--no-enable-lzcnt',
         ],
-        v8_fuzz_config.Config('foo', Rng(), 42).choose_foozzie_flags(),
+        v8_fuzz_config.Config('foo', random.Random(42)).choose_foozzie_flags(),
     )
 
 

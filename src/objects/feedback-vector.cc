@@ -52,7 +52,6 @@ static bool IsPropertyNameFeedback(MaybeObject feedback) {
   Symbol symbol = Symbol::cast(heap_object);
   ReadOnlyRoots roots = symbol.GetReadOnlyRoots();
   return symbol != roots.uninitialized_symbol() &&
-         symbol != roots.premonomorphic_symbol() &&
          symbol != roots.megamorphic_symbol();
 }
 
@@ -233,8 +232,8 @@ Handle<FeedbackVector> FeedbackVector::New(
 
   const int slot_count = shared->feedback_metadata().slot_count();
 
-  Handle<FeedbackVector> vector = factory->NewFeedbackVector(
-      shared, closure_feedback_cell_array, AllocationType::kOld);
+  Handle<FeedbackVector> vector =
+      factory->NewFeedbackVector(shared, closure_feedback_cell_array);
 
   DCHECK_EQ(vector->length(), slot_count);
 
@@ -269,14 +268,14 @@ Handle<FeedbackVector> FeedbackVector::New(
       case FeedbackSlotKind::kForIn:
       case FeedbackSlotKind::kCompareOp:
       case FeedbackSlotKind::kBinaryOp:
-        vector->set(index, Smi::kZero, SKIP_WRITE_BARRIER);
+        vector->set(index, Smi::zero(), SKIP_WRITE_BARRIER);
         break;
       case FeedbackSlotKind::kLiteral:
-        vector->set(index, Smi::kZero, SKIP_WRITE_BARRIER);
+        vector->set(index, Smi::zero(), SKIP_WRITE_BARRIER);
         break;
       case FeedbackSlotKind::kCall:
         vector->set(index, *uninitialized_sentinel, SKIP_WRITE_BARRIER);
-        extra_value = Smi::kZero;
+        extra_value = Smi::zero();
         break;
       case FeedbackSlotKind::kCloneObject:
       case FeedbackSlotKind::kLoadProperty:
@@ -446,7 +445,7 @@ void FeedbackNexus::ConfigureUninitialized() {
     case FeedbackSlotKind::kCall: {
       SetFeedback(*FeedbackVector::UninitializedSentinel(isolate),
                   SKIP_WRITE_BARRIER);
-      SetFeedbackExtra(Smi::kZero, SKIP_WRITE_BARRIER);
+      SetFeedbackExtra(Smi::zero(), SKIP_WRITE_BARRIER);
       break;
     }
     case FeedbackSlotKind::kInstanceOf: {
@@ -490,7 +489,7 @@ bool FeedbackNexus::Clear() {
       break;
 
     case FeedbackSlotKind::kLiteral:
-      SetFeedback(Smi::kZero, SKIP_WRITE_BARRIER);
+      SetFeedback(Smi::zero(), SKIP_WRITE_BARRIER);
       feedback_updated = true;
       break;
 
@@ -522,12 +521,6 @@ bool FeedbackNexus::Clear() {
       UNREACHABLE();
   }
   return feedback_updated;
-}
-
-void FeedbackNexus::ConfigurePremonomorphic(Handle<Map> receiver_map) {
-  SetFeedback(*FeedbackVector::PremonomorphicSentinel(GetIsolate()),
-              SKIP_WRITE_BARRIER);
-  SetFeedbackExtra(HeapObjectReference::Weak(*receiver_map));
 }
 
 bool FeedbackNexus::ConfigureMegamorphic() {
@@ -585,13 +578,6 @@ InlineCacheState FeedbackNexus::ic_state() const {
     case FeedbackSlotKind::kLoadGlobalInsideTypeof: {
       if (feedback->IsSmi()) return MONOMORPHIC;
 
-      if (feedback == MaybeObject::FromObject(
-                          *FeedbackVector::PremonomorphicSentinel(isolate))) {
-        DCHECK(kind() == FeedbackSlotKind::kStoreGlobalSloppy ||
-               kind() == FeedbackSlotKind::kStoreGlobalStrict);
-        return PREMONOMORPHIC;
-      }
-
       DCHECK(feedback->IsWeakOrCleared());
       MaybeObject extra = GetFeedbackExtra();
       if (!feedback->IsCleared() ||
@@ -618,10 +604,6 @@ InlineCacheState FeedbackNexus::ic_state() const {
       if (feedback == MaybeObject::FromObject(
                           *FeedbackVector::MegamorphicSentinel(isolate))) {
         return MEGAMORPHIC;
-      }
-      if (feedback == MaybeObject::FromObject(
-                          *FeedbackVector::PremonomorphicSentinel(isolate))) {
-        return PREMONOMORPHIC;
       }
       if (feedback->IsWeakOrCleared()) {
         // Don't check if the map is cleared.
@@ -887,8 +869,7 @@ float FeedbackNexus::ComputeCallFrequency() {
 
   double const invocation_count = vector().invocation_count();
   double const call_count = GetCallCount();
-  if (invocation_count == 0) {
-    // Prevent division by 0.
+  if (invocation_count == 0.0) {  // Prevent division by 0.
     return 0.0f;
   }
   return static_cast<float>(call_count / invocation_count);
@@ -975,14 +956,6 @@ int FeedbackNexus::ExtractMaps(MapHandles* maps) const {
     Map map = Map::cast(heap_object);
     maps->push_back(handle(map, isolate));
     return 1;
-  } else if (feedback->GetHeapObjectIfStrong(&heap_object) &&
-             heap_object ==
-                 heap_object.GetReadOnlyRoots().premonomorphic_symbol()) {
-    if (GetFeedbackExtra()->GetHeapObjectIfWeak(&heap_object)) {
-      Map map = Map::cast(heap_object);
-      maps->push_back(handle(map, isolate));
-      return 1;
-    }
   }
 
   return 0;
@@ -1094,6 +1067,12 @@ Name FeedbackNexus::GetName() const {
       return Name::cast(feedback->GetHeapObjectAssumeStrong());
     }
   }
+  if (IsStoreDataPropertyInLiteralKind(kind())) {
+    MaybeObject extra = GetFeedbackExtra();
+    if (IsPropertyNameFeedback(extra)) {
+      return Name::cast(extra->GetHeapObjectAssumeStrong());
+    }
+  }
   return Name();
 }
 
@@ -1180,7 +1159,8 @@ KeyedAccessStoreMode KeyedAccessStoreModeForBuiltin(int builtin_index) {
 }  // namespace
 
 KeyedAccessStoreMode FeedbackNexus::GetKeyedAccessStoreMode() const {
-  DCHECK(IsKeyedStoreICKind(kind()) || IsStoreInArrayLiteralICKind(kind()));
+  DCHECK(IsKeyedStoreICKind(kind()) || IsStoreInArrayLiteralICKind(kind()) ||
+         IsStoreDataPropertyInLiteralKind(kind()));
   KeyedAccessStoreMode mode = STANDARD_STORE;
   MapHandles maps;
   MaybeObjectHandles handlers;
@@ -1197,9 +1177,11 @@ KeyedAccessStoreMode FeedbackNexus::GetKeyedAccessStoreMode() const {
       handler = handle(Code::cast(data_handler->smi_handler()),
                        vector().GetIsolate());
     } else if (maybe_code_handler.object()->IsSmi()) {
-      // Skip proxy handlers.
-      DCHECK_EQ(*(maybe_code_handler.object()),
-                *StoreHandler::StoreProxy(GetIsolate()));
+      // Skip proxy handlers and the slow handler.
+      DCHECK(*(maybe_code_handler.object()) ==
+                 *StoreHandler::StoreProxy(GetIsolate()) ||
+             *(maybe_code_handler.object()) ==
+                 *StoreHandler::StoreSlow(GetIsolate()));
       continue;
     } else {
       // Element store without prototype chain check.
@@ -1220,14 +1202,17 @@ KeyedAccessStoreMode FeedbackNexus::GetKeyedAccessStoreMode() const {
 
 IcCheckType FeedbackNexus::GetKeyType() const {
   DCHECK(IsKeyedStoreICKind(kind()) || IsKeyedLoadICKind(kind()) ||
-         IsStoreInArrayLiteralICKind(kind()) || IsKeyedHasICKind(kind()));
+         IsStoreInArrayLiteralICKind(kind()) || IsKeyedHasICKind(kind()) ||
+         IsStoreDataPropertyInLiteralKind(kind()));
   MaybeObject feedback = GetFeedback();
   if (feedback == MaybeObject::FromObject(
                       *FeedbackVector::MegamorphicSentinel(GetIsolate()))) {
     return static_cast<IcCheckType>(
         Smi::ToInt(GetFeedbackExtra()->cast<Object>()));
   }
-  return IsPropertyNameFeedback(feedback) ? PROPERTY : ELEMENT;
+  MaybeObject maybe_name =
+      IsStoreDataPropertyInLiteralKind(kind()) ? GetFeedbackExtra() : feedback;
+  return IsPropertyNameFeedback(maybe_name) ? PROPERTY : ELEMENT;
 }
 
 BinaryOperationHint FeedbackNexus::GetBinaryOperationFeedback() const {
@@ -1293,8 +1278,8 @@ void FeedbackNexus::Collect(Handle<String> type, int position) {
 
   Handle<ArrayList> position_specific_types;
 
-  int entry = types->FindEntry(isolate, position);
-  if (entry == SimpleNumberDictionary::kNotFound) {
+  InternalIndex entry = types->FindEntry(isolate, position);
+  if (entry.is_not_found()) {
     position_specific_types = ArrayList::New(isolate, 1);
     types = SimpleNumberDictionary::Set(
         isolate, types, position,
@@ -1356,10 +1341,9 @@ std::vector<Handle<String>> FeedbackNexus::GetTypesForSourcePositions(
       SimpleNumberDictionary::cast(feedback->GetHeapObjectAssumeStrong()),
       isolate);
 
-  int entry = types->FindEntry(isolate, position);
-  if (entry == SimpleNumberDictionary::kNotFound) {
-    return types_for_position;
-  }
+  InternalIndex entry = types->FindEntry(isolate, position);
+  if (entry.is_not_found()) return types_for_position;
+
   DCHECK(types->ValueAt(entry).IsArrayList());
   Handle<ArrayList> position_specific_types =
       Handle<ArrayList>(ArrayList::cast(types->ValueAt(entry)), isolate);

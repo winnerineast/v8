@@ -35,6 +35,8 @@ class TranslatedState;
 class RegisterValues;
 class MacroAssembler;
 
+enum class BuiltinContinuationMode;
+
 class TranslatedValue {
  public:
   // Allocation-less getter of the value.
@@ -172,7 +174,14 @@ class TranslatedFrame {
   Kind kind() const { return kind_; }
   BailoutId node_id() const { return node_id_; }
   Handle<SharedFunctionInfo> shared_info() const { return shared_info_; }
+
+  // TODO(jgruber): Simplify/clarify the semantics of this field. The name
+  // `height` is slightly misleading. Yes, this value is related to stack frame
+  // height, but must undergo additional mutations to arrive at the real stack
+  // frame height (e.g.: addition/subtraction of context, accumulator, fixed
+  // frame sizes, padding).
   int height() const { return height_; }
+
   int return_value_offset() const { return return_value_offset_; }
   int return_value_count() const { return return_value_count_; }
 
@@ -352,8 +361,8 @@ class TranslatedState {
   void UpdateFromPreviouslyMaterializedObjects();
   void MaterializeFixedDoubleArray(TranslatedFrame* frame, int* value_index,
                                    TranslatedValue* slot, Handle<Map> map);
-  void MaterializeMutableHeapNumber(TranslatedFrame* frame, int* value_index,
-                                    TranslatedValue* slot);
+  void MaterializeHeapNumber(TranslatedFrame* frame, int* value_index,
+                             TranslatedValue* slot);
 
   void EnsureObjectAllocatedAt(TranslatedValue* slot);
 
@@ -479,14 +488,14 @@ class Deoptimizer : public Malloced {
                                     DeoptimizeKind* type);
 
   // Code generation support.
-  static int input_offset() { return OFFSET_OF(Deoptimizer, input_); }
+  static int input_offset() { return offsetof(Deoptimizer, input_); }
   static int output_count_offset() {
-    return OFFSET_OF(Deoptimizer, output_count_);
+    return offsetof(Deoptimizer, output_count_);
   }
-  static int output_offset() { return OFFSET_OF(Deoptimizer, output_); }
+  static int output_offset() { return offsetof(Deoptimizer, output_); }
 
   static int caller_frame_top_offset() {
-    return OFFSET_OF(Deoptimizer, caller_frame_top_);
+    return offsetof(Deoptimizer, caller_frame_top_);
   }
 
   V8_EXPORT_PRIVATE static int GetDeoptimizedCodeCount(Isolate* isolate);
@@ -510,13 +519,6 @@ class Deoptimizer : public Malloced {
   // kSupportsFixedDeoptExitSize is true.
   static const int kDeoptExitSize;
 
-  enum class BuiltinContinuationMode {
-    STUB,
-    JAVASCRIPT,
-    JAVASCRIPT_WITH_CATCH,
-    JAVASCRIPT_HANDLE_EXCEPTION
-  };
-
  private:
   friend class FrameWriter;
   void QueueValueForMaterialization(Address output_address, Object obj,
@@ -539,8 +541,6 @@ class Deoptimizer : public Malloced {
   void DoComputeConstructStubFrame(TranslatedFrame* translated_frame,
                                    int frame_index);
 
-  static bool BuiltinContinuationModeIsWithCatch(BuiltinContinuationMode mode);
-  static bool BuiltinContinuationModeIsJavaScript(BuiltinContinuationMode mode);
   static Builtins::Name TrampolineForBuiltinContinuation(
       BuiltinContinuationMode mode, bool must_handle_result);
 
@@ -550,7 +550,6 @@ class Deoptimizer : public Malloced {
 
   unsigned ComputeInputFrameAboveFpFixedSize() const;
   unsigned ComputeInputFrameSize() const;
-  static unsigned ComputeInterpretedFixedSize(SharedFunctionInfo shared);
 
   static unsigned ComputeIncomingArgumentSize(SharedFunctionInfo shared);
   static unsigned ComputeOutgoingArgumentSize(Code code, unsigned bailout_id);
@@ -561,11 +560,6 @@ class Deoptimizer : public Malloced {
 
   static void MarkAllCodeForContext(NativeContext native_context);
   static void DeoptimizeMarkedCodeForContext(NativeContext native_context);
-
-  // Some architectures need to push padding together with the TOS register
-  // in order to maintain stack alignment.
-  static bool PadTopOfStackRegister();
-
   // Searches the list of known deoptimizing code for a Code object
   // containing the given address (which is supposedly faster than
   // searching all code objects).
@@ -680,7 +674,7 @@ class FrameDescription {
 
   unsigned GetLastArgumentSlotOffset() {
     int parameter_slots = parameter_count();
-    if (kPadArguments) parameter_slots = RoundUp(parameter_slots, 2);
+    if (ShouldPadArguments(parameter_slots)) parameter_slots++;
     return GetFrameSize() - parameter_slots * kSystemPointerSize;
   }
 
@@ -737,11 +731,11 @@ class FrameDescription {
   int parameter_count() { return parameter_count_; }
 
   static int registers_offset() {
-    return OFFSET_OF(FrameDescription, register_values_.registers_);
+    return offsetof(FrameDescription, register_values_.registers_);
   }
 
   static int double_registers_offset() {
-    return OFFSET_OF(FrameDescription, register_values_.double_registers_);
+    return offsetof(FrameDescription, register_values_.double_registers_);
   }
 
   static int frame_size_offset() {

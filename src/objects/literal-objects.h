@@ -5,6 +5,7 @@
 #ifndef V8_OBJECTS_LITERAL_OBJECTS_H_
 #define V8_OBJECTS_LITERAL_OBJECTS_H_
 
+#include "src/base/bit-field.h"
 #include "src/objects/fixed-array.h"
 #include "src/objects/struct.h"
 
@@ -55,29 +56,22 @@ class ObjectBoilerplateDescription : public FixedArray {
   OBJECT_CONSTRUCTORS(ObjectBoilerplateDescription, FixedArray);
 };
 
-class ArrayBoilerplateDescription : public Struct {
+class ArrayBoilerplateDescription
+    : public TorqueGeneratedArrayBoilerplateDescription<
+          ArrayBoilerplateDescription, Struct> {
  public:
-  // store constant_elements of a fixed array
-  DECL_ACCESSORS(constant_elements, FixedArrayBase)
-
   inline ElementsKind elements_kind() const;
   inline void set_elements_kind(ElementsKind kind);
 
   inline bool is_empty() const;
 
-  DECL_CAST(ArrayBoilerplateDescription)
   // Dispatched behavior.
   DECL_PRINTER(ArrayBoilerplateDescription)
-  DECL_VERIFIER(ArrayBoilerplateDescription)
   void BriefPrintDetails(std::ostream& os);
-
-  DEFINE_FIELD_OFFSET_CONSTANTS(
-      HeapObject::kHeaderSize,
-      TORQUE_GENERATED_ARRAY_BOILERPLATE_DESCRIPTION_FIELDS)
 
  private:
   DECL_INT_ACCESSORS(flags)
-  OBJECT_CONSTRUCTORS(ArrayBoilerplateDescription, Struct);
+  TQ_OBJECT_CONSTRUCTORS(ArrayBoilerplateDescription)
 };
 
 class ClassBoilerplate : public FixedArray {

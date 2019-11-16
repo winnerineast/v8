@@ -27,6 +27,8 @@ CallPrinter::CallPrinter(Isolate* isolate, bool is_user_js)
   is_call_error_ = false;
   is_iterator_error_ = false;
   is_async_iterator_error_ = false;
+  destructuring_prop_ = nullptr;
+  destructuring_assignment_ = nullptr;
   is_user_js_ = is_user_js;
   function_kind_ = kNormalFunction;
   InitializeAstVisitor(isolate);
@@ -215,8 +217,11 @@ void CallPrinter::VisitFunctionLiteral(FunctionLiteral* node) {
 
 void CallPrinter::VisitClassLiteral(ClassLiteral* node) {
   if (node->extends()) Find(node->extends());
-  for (int i = 0; i < node->properties()->length(); i++) {
-    Find(node->properties()->at(i)->value());
+  for (int i = 0; i < node->public_members()->length(); i++) {
+    Find(node->public_members()->at(i)->value());
+  }
+  for (int i = 0; i < node->private_members()->length(); i++) {
+    Find(node->private_members()->at(i)->value());
   }
 }
 
@@ -299,24 +304,50 @@ void CallPrinter::VisitVariableProxy(VariableProxy* node) {
 
 
 void CallPrinter::VisitAssignment(Assignment* node) {
-  Find(node->target());
-  if (node->target()->IsArrayLiteral()) {
-    // Special case the visit for destructuring array assignment.
-    bool was_found = false;
-    if (node->value()->position() == position_) {
-      is_iterator_error_ = true;
+  bool was_found = false;
+  if (node->target()->IsObjectLiteral()) {
+    ObjectLiteral* target = node->target()->AsObjectLiteral();
+    if (target->position() == position_) {
       was_found = !found_;
-      if (was_found) {
-        found_ = true;
+      found_ = true;
+      destructuring_assignment_ = node;
+    } else {
+      for (ObjectLiteralProperty* prop : *target->properties()) {
+        if (prop->value()->position() == position_) {
+          was_found = !found_;
+          found_ = true;
+          destructuring_prop_ = prop;
+          destructuring_assignment_ = node;
+          break;
+        }
       }
     }
-    Find(node->value(), true);
-    if (was_found) {
-      done_ = true;
-      found_ = false;
+  }
+  if (!was_found) {
+    Find(node->target());
+    if (node->target()->IsArrayLiteral()) {
+      // Special case the visit for destructuring array assignment.
+      bool was_found = false;
+      if (node->value()->position() == position_) {
+        is_iterator_error_ = true;
+        was_found = !found_;
+        found_ = true;
+      }
+      Find(node->value(), true);
+      if (was_found) {
+        done_ = true;
+        found_ = false;
+      }
+    } else {
+      Find(node->value());
     }
   } else {
-    Find(node->value());
+    Find(node->value(), true);
+  }
+
+  if (was_found) {
+    done_ = true;
+    found_ = false;
   }
 }
 
@@ -551,7 +582,8 @@ void CallPrinter::PrintLiteral(Handle<Object> value, bool quote) {
     Print(isolate_->factory()->NumberToString(value));
   } else if (value->IsSymbol()) {
     // Symbols can only occur as literals if they were inserted by the parser.
-    PrintLiteral(handle(Handle<Symbol>::cast(value)->name(), isolate_), false);
+    PrintLiteral(handle(Handle<Symbol>::cast(value)->description(), isolate_),
+                 false);
   }
 }
 
@@ -1078,7 +1110,8 @@ void AstPrinter::VisitClassLiteral(ClassLiteral* node) {
     PrintIndentedVisit("INSTANCE MEMBERS INITIALIZER",
                        node->instance_members_initializer_function());
   }
-  PrintClassProperties(node->properties());
+  PrintClassProperties(node->private_members());
+  PrintClassProperties(node->public_members());
 }
 
 void AstPrinter::VisitInitializeClassMembersStatement(
@@ -1238,6 +1271,9 @@ void AstPrinter::VisitVariableProxy(VariableProxy* node) {
         break;
       case VariableLocation::MODULE:
         SNPrintF(buf + pos, " module");
+        break;
+      case VariableLocation::REPL_GLOBAL:
+        SNPrintF(buf + pos, " repl global[%d]", var->index());
         break;
     }
     PrintLiteralWithModeIndented(buf.begin(), var, node->raw_name());

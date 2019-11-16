@@ -192,6 +192,18 @@ void RegExpMacroAssemblerMIPS::AdvanceRegister(int reg, int by) {
 
 void RegExpMacroAssemblerMIPS::Backtrack() {
   CheckPreemption();
+  if (has_backtrack_limit()) {
+    Label next;
+    __ Ld(a0, MemOperand(frame_pointer(), kBacktrackCount));
+    __ Daddu(a0, a0, Operand(1));
+    __ Sd(a0, MemOperand(frame_pointer(), kBacktrackCount));
+    __ Branch(&next, ne, a0, Operand(backtrack_limit()));
+
+    // Exceeded limits are treated as a failed match.
+    Fail();
+
+    __ bind(&next);
+  }
   // Pop Code offset from backtrack stack, add Code and jump to location.
   Pop(a0);
   __ Daddu(a0, a0, code_pointer());
@@ -214,9 +226,10 @@ void RegExpMacroAssemblerMIPS::CheckCharacterGT(uc16 limit, Label* on_greater) {
 }
 
 
-void RegExpMacroAssemblerMIPS::CheckAtStart(Label* on_at_start) {
+void RegExpMacroAssemblerMIPS::CheckAtStart(int cp_offset, Label* on_at_start) {
   __ Ld(a1, MemOperand(frame_pointer(), kStringStartMinusOne));
-  __ Daddu(a0, current_input_offset(), Operand(-char_size()));
+  __ Daddu(a0, current_input_offset(),
+           Operand(-char_size() + cp_offset * char_size()));
   BranchOrBacktrack(on_at_start, eq, a0, Operand(a1));
 }
 
@@ -674,16 +687,21 @@ Handle<HeapObject> RegExpMacroAssemblerMIPS::GetCode(Handle<String> source) {
     // from generated code.
     // TODO(plind): this 8 is the # of argument regs, should have definition.
     __ Daddu(frame_pointer(), sp, Operand(8 * kPointerSize));
+    STATIC_ASSERT(kSuccessfulCaptures == kInputString - kSystemPointerSize);
     __ mov(a0, zero_reg);
     __ push(a0);  // Make room for success counter and initialize it to 0.
+    STATIC_ASSERT(kStringStartMinusOne ==
+                  kSuccessfulCaptures - kSystemPointerSize);
     __ push(a0);  // Make room for "string start - 1" constant.
+    STATIC_ASSERT(kBacktrackCount == kStringStartMinusOne - kSystemPointerSize);
+    __ push(a0);  // The backtrack counter
 
     // Check if we have space on the stack for registers.
     Label stack_limit_hit;
     Label stack_ok;
 
     ExternalReference stack_limit =
-        ExternalReference::address_of_stack_limit(masm_->isolate());
+        ExternalReference::address_of_jslimit(masm_->isolate());
     __ li(a0, Operand(stack_limit));
     __ Ld(a0, MemOperand(a0));
     __ Dsubu(a0, sp, a0);
@@ -1164,21 +1182,11 @@ void RegExpMacroAssemblerMIPS::CallCheckStackGuardState(Register scratch) {
       ExternalReference::re_check_stack_guard_state(masm_->isolate());
   __ li(t9, Operand(stack_guard_check));
 
-  if (FLAG_embedded_builtins) {
-    EmbeddedData d = EmbeddedData::FromBlob();
-    CHECK(Builtins::IsIsolateIndependent(Builtins::kDirectCEntry));
-    Address entry = d.InstructionStartOfBuiltin(Builtins::kDirectCEntry);
-    __ li(kScratchReg, Operand(entry, RelocInfo::OFF_HEAP_TARGET));
-    __ Call(kScratchReg);
-  } else {
-    // TODO(v8:8519): Remove this once embedded builtins are on unconditionally.
-    Handle<Code> code = BUILTIN_CODE(isolate(), DirectCEntry);
-    __ li(kScratchReg,
-          Operand(reinterpret_cast<intptr_t>(code.location()),
-                  RelocInfo::CODE_TARGET),
-          CONSTANT_SIZE);
-    __ Call(kScratchReg);
-  }
+  EmbeddedData d = EmbeddedData::FromBlob();
+  CHECK(Builtins::IsIsolateIndependent(Builtins::kDirectCEntry));
+  Address entry = d.InstructionStartOfBuiltin(Builtins::kDirectCEntry);
+  __ li(kScratchReg, Operand(entry, RelocInfo::OFF_HEAP_TARGET));
+  __ Call(kScratchReg);
 
   // DirectCEntry allocated space for the C argument slots so we have to
   // drop them with the return address from the stack with loading saved sp.
@@ -1309,7 +1317,7 @@ void RegExpMacroAssemblerMIPS::Pop(Register target) {
 void RegExpMacroAssemblerMIPS::CheckPreemption() {
   // Check for preemption.
   ExternalReference stack_limit =
-      ExternalReference::address_of_stack_limit(masm_->isolate());
+      ExternalReference::address_of_jslimit(masm_->isolate());
   __ li(a0, Operand(stack_limit));
   __ Ld(a0, MemOperand(a0));
   SafeCall(&check_preempt_label_, ls, sp, Operand(a0));
@@ -1318,7 +1326,8 @@ void RegExpMacroAssemblerMIPS::CheckPreemption() {
 
 void RegExpMacroAssemblerMIPS::CheckStackLimit() {
   ExternalReference stack_limit =
-      ExternalReference::address_of_regexp_stack_limit(masm_->isolate());
+      ExternalReference::address_of_regexp_stack_limit_address(
+          masm_->isolate());
 
   __ li(a0, Operand(stack_limit));
   __ Ld(a0, MemOperand(a0));

@@ -57,6 +57,52 @@ load('test/mjsunit/wasm/wasm-module-builder.js');
   assertEquals(2, Object.getOwnPropertyNames(type).length);
 })();
 
+(function TestMemoryExports() {
+  let builder = new WasmModuleBuilder();
+  builder.addMemory(1).exportMemoryAs("a")
+  let module = new WebAssembly.Module(builder.toBuffer());
+  let exports = WebAssembly.Module.exports(module);
+
+  assertEquals("a", exports[0].name);
+  assertTrue("type" in exports[0]);
+  assertEquals(1, exports[0].type.minimum);
+  assertFalse("maximum" in exports[0].type);
+
+  builder = new WasmModuleBuilder();
+  builder.addMemory(2, 16).exportMemoryAs("b")
+  module = new WebAssembly.Module(builder.toBuffer());
+  exports = WebAssembly.Module.exports(module);
+
+  assertEquals("b", exports[0].name);
+  assertTrue("type" in exports[0]);
+  assertEquals(2, exports[0].type.minimum);
+  assertEquals(16, exports[0].type.maximum);
+})();
+
+(function TestMemoryImports() {
+  let builder = new WasmModuleBuilder();
+  builder.addImportedMemory("m", "a", 1);
+  let module = new WebAssembly.Module(builder.toBuffer());
+  let imports = WebAssembly.Module.imports(module);
+
+  assertEquals("a", imports[0].name);
+  assertEquals("m", imports[0].module);
+  assertTrue("type" in imports[0]);
+  assertEquals(1, imports[0].type.minimum);
+  assertFalse("maximum" in imports[0].type);
+
+  builder = new WasmModuleBuilder();
+  builder.addImportedMemory("m", "b", 2, 16);
+  module = new WebAssembly.Module(builder.toBuffer());
+  imports = WebAssembly.Module.imports(module);
+
+  assertEquals("b", imports[0].name);
+  assertEquals("m", imports[0].module);
+  assertTrue("type" in imports[0]);
+  assertEquals(2, imports[0].type.minimum);
+  assertEquals(16, imports[0].type.maximum);
+})();
+
 (function TestTableType() {
   let table = new WebAssembly.Table({initial: 1, element: "anyfunc"});
   let type = WebAssembly.Table.type(table);
@@ -71,6 +117,56 @@ load('test/mjsunit/wasm/wasm-module-builder.js');
   assertEquals(15, type.maximum);
   assertEquals("anyfunc", type.element);
   assertEquals(3, Object.getOwnPropertyNames(type).length);
+})();
+
+(function TestTableExports() {
+  let builder = new WasmModuleBuilder();
+  builder.addTable(kWasmAnyFunc, 20).exportAs("a");
+  let module = new WebAssembly.Module(builder.toBuffer());
+  let exports = WebAssembly.Module.exports(module);
+
+  assertEquals("a", exports[0].name);
+  assertTrue("type" in exports[0]);
+  assertEquals("anyfunc", exports[0].type.element);
+  assertEquals(20, exports[0].type.minimum);
+  assertFalse("maximum" in exports[0].type);
+
+  builder = new WasmModuleBuilder();
+  builder.addTable(kWasmAnyFunc, 15, 25).exportAs("b");
+  module = new WebAssembly.Module(builder.toBuffer());
+  exports = WebAssembly.Module.exports(module);
+
+  assertEquals("b", exports[0].name);
+  assertTrue("type" in exports[0]);
+  assertEquals("anyfunc", exports[0].type.element);
+  assertEquals(15, exports[0].type.minimum);
+  assertEquals(25, exports[0].type.maximum);
+})();
+
+(function TestTableImports() {
+  let builder = new WasmModuleBuilder();
+  builder.addImportedTable("m", "a", 20, undefined, kWasmAnyFunc);
+  let module = new WebAssembly.Module(builder.toBuffer());
+  let imports = WebAssembly.Module.imports(module);
+
+  assertEquals("a", imports[0].name);
+  assertEquals("m", imports[0].module);
+  assertTrue("type" in imports[0]);
+  assertEquals("anyfunc", imports[0].type.element);
+  assertEquals(20, imports[0].type.minimum);
+  assertFalse("maximum" in imports[0].type);
+
+  builder = new WasmModuleBuilder();
+  builder.addImportedTable("m", "b", 15, 25, kWasmAnyFunc);
+  module = new WebAssembly.Module(builder.toBuffer());
+  imports = WebAssembly.Module.imports(module);
+
+  assertEquals("b", imports[0].name);
+  assertEquals("m", imports[0].module);
+  assertTrue("type" in imports[0]);
+  assertEquals("anyfunc", imports[0].type.element);
+  assertEquals(15, imports[0].type.minimum);
+  assertEquals(25, imports[0].type.maximum);
 })();
 
 (function TestGlobalType() {
@@ -103,6 +199,44 @@ load('test/mjsunit/wasm/wasm-module-builder.js');
   assertEquals("f64", type.value);
   assertEquals(false, type.mutable);
   assertEquals(2, Object.getOwnPropertyNames(type).length);
+})();
+
+(function TestGlobalExports() {
+  let builder = new WasmModuleBuilder();
+  builder.addGlobal(kWasmI32).exportAs("a");
+  builder.addGlobal(kWasmF64, true).exportAs("b");
+  let module = new WebAssembly.Module(builder.toBuffer());
+  let exports = WebAssembly.Module.exports(module);
+
+  assertEquals("a", exports[0].name);
+  assertTrue("type" in exports[0]);
+  assertEquals("i32", exports[0].type.value);
+  assertEquals(false, exports[0].type.mutable);
+
+  assertEquals("b", exports[1].name);
+  assertTrue("type" in exports[1]);
+  assertEquals("f64", exports[1].type.value);
+  assertEquals(true, exports[1].type.mutable);
+})();
+
+(function TestGlobalImports() {
+  let builder = new WasmModuleBuilder();
+  builder.addImportedGlobal("m", "a", kWasmI32);
+  builder.addImportedGlobal("m", "b", kWasmF64, true);
+  let module = new WebAssembly.Module(builder.toBuffer());
+  let imports = WebAssembly.Module.imports(module);
+
+  assertEquals("a", imports[0].name);
+  assertEquals("m", imports[0].module);
+  assertTrue("type" in imports[0]);
+  assertEquals("i32", imports[0].type.value);
+  assertEquals(false, imports[0].type.mutable);
+
+  assertEquals("b", imports[1].name);
+  assertEquals("m", imports[1].module);
+  assertTrue("type" in imports[1]);
+  assertEquals("f64", imports[1].type.value);
+  assertEquals(true, imports[1].type.mutable);
 })();
 
 (function TestMemoryConstructorWithMinimum() {
@@ -306,6 +440,45 @@ load('test/mjsunit/wasm/wasm-module-builder.js');
   });
 })();
 
+(function TestFunctionExports() {
+  let testcases = [
+    [kSig_v_v, {parameters:[], results:[]}],
+    [kSig_v_i, {parameters:["i32"], results:[]}],
+    [kSig_i_l, {parameters:["i64"], results:["i32"]}],
+    [kSig_v_ddi, {parameters:["f64", "f64", "i32"], results:[]}],
+    [kSig_f_f, {parameters:["f32"], results:["f32"]}],
+  ];
+  testcases.forEach(function([sig, expected]) {
+    let builder = new WasmModuleBuilder();
+    builder.addFunction("fun", sig).addBody([kExprUnreachable]).exportFunc();
+    let module = new WebAssembly.Module(builder.toBuffer());
+    let exports = WebAssembly.Module.exports(module);
+    assertEquals("fun", exports[0].name);
+    assertTrue("type" in exports[0]);
+    assertEquals(expected, exports[0].type);
+  });
+})();
+
+(function TestFunctionImports() {
+  let testcases = [
+    [kSig_v_v, {parameters:[], results:[]}],
+    [kSig_v_i, {parameters:["i32"], results:[]}],
+    [kSig_i_l, {parameters:["i64"], results:["i32"]}],
+    [kSig_v_ddi, {parameters:["f64", "f64", "i32"], results:[]}],
+    [kSig_f_f, {parameters:["f32"], results:["f32"]}],
+  ];
+  testcases.forEach(function([sig, expected]) {
+    let builder = new WasmModuleBuilder();
+    builder.addImport("m", "fun", sig);
+    let module = new WebAssembly.Module(builder.toBuffer());
+    let imports = WebAssembly.Module.imports(module);
+    assertEquals("fun", imports[0].name);
+    assertEquals("m", imports[0].module);
+    assertTrue("type" in imports[0]);
+    assertEquals(expected, imports[0].type);
+  });
+})();
+
 (function TestFunctionConstructedCoercions() {
   let obj1 = { valueOf: _ => 123.45 };
   let obj2 = { toString: _ => "456" };
@@ -360,7 +533,7 @@ load('test/mjsunit/wasm/wasm-module-builder.js');
   table.set(0, fun1);
   builder.addFunction('main', kSig_i_i)
       .addBody([
-        kExprGetLocal, 0,
+        kExprLocalGet, 0,
         kExprCallIndirect, sig_index, table_index
       ])
       .exportFunc();
@@ -381,7 +554,7 @@ load('test/mjsunit/wasm/wasm-module-builder.js');
   table.set(0, fun);
   builder.addFunction('main', kSig_v_i)
       .addBody([
-        kExprGetLocal, 0,
+        kExprLocalGet, 0,
         kExprCallIndirect, sig_index, table_index,
         kExprDrop
       ])
@@ -430,4 +603,15 @@ load('test/mjsunit/wasm/wasm-module-builder.js');
   assertThrows(
     () => builder.instantiate({ m: { fun: fun3 }}), WebAssembly.LinkError,
     /imported function does not match the expected type/);
+})();
+
+(function TestFunctionModuleImportReExport () {
+  let builder = new WasmModuleBuilder();
+  let fun = new WebAssembly.Function({parameters:[], results:["i32"]}, _ => 7);
+  let fun_index = builder.addImport("m", "fun", kSig_i_v)
+  builder.addExport("fun1", fun_index);
+  builder.addExport("fun2", fun_index);
+  let instance = builder.instantiate({ m: { fun: fun }});
+  assertSame(instance.exports.fun1, instance.exports.fun2);
+  assertSame(fun, instance.exports.fun1);
 })();

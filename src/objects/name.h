@@ -5,9 +5,9 @@
 #ifndef V8_OBJECTS_NAME_H_
 #define V8_OBJECTS_NAME_H_
 
-#include "src/objects/heap-object.h"
+#include "src/base/bit-field.h"
 #include "src/objects/objects.h"
-#include "torque-generated/class-definitions-tq.h"
+#include "src/objects/primitive-heap-object.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -17,7 +17,7 @@ namespace internal {
 
 // The Name abstract class captures anything that can be used as a property
 // name, i.e., strings and symbols.  All names store a hash value.
-class Name : public TorqueGeneratedName<Name, HeapObject> {
+class Name : public TorqueGeneratedName<Name, PrimitiveHeapObject> {
  public:
   // Tells whether the hash code has been computed.
   inline bool HasHashCode();
@@ -32,6 +32,7 @@ class Name : public TorqueGeneratedName<Name, HeapObject> {
 
   // Conversion.
   inline bool AsArrayIndex(uint32_t* index);
+  inline bool AsIntegerIndex(size_t* index);
 
   // An "interesting symbol" is a well-known symbol, like @@toStringTag,
   // that's often looked up on random objects but is usually not present.
@@ -49,6 +50,11 @@ class Name : public TorqueGeneratedName<Name, HeapObject> {
   // symbol but also throw on property access miss.
   inline bool IsPrivateName() const;
   inline bool IsPrivateName(Isolate* isolate) const;
+
+  // If the name is a private brand, it should behave like a private name
+  // symbol but is filtered out when generating list of private fields.
+  inline bool IsPrivateBrand() const;
+  inline bool IsPrivateBrand(Isolate* isolate) const;
 
   inline bool IsUniqueName() const;
   inline bool IsUniqueName(Isolate* isolate) const;
@@ -73,7 +79,8 @@ class Name : public TorqueGeneratedName<Name, HeapObject> {
   // array index.
   static const int kHashNotComputedMask = 1;
   static const int kIsNotArrayIndexMask = 1 << 1;
-  static const int kNofHashBitFields = 2;
+  static const int kIsNotIntegerIndexMask = 1 << 2;
+  static const int kNofHashBitFields = 3;
 
   // Shift constant retrieving hash code from hash field.
   static const int kHashShift = kNofHashBitFields;
@@ -88,6 +95,14 @@ class Name : public TorqueGeneratedName<Name, HeapObject> {
   // Maximum number of characters to consider when trying to convert a string
   // value into an array index.
   static const int kMaxArrayIndexSize = 10;
+  // Maximum number of characters that might be parsed into a size_t:
+  // 10 characters per 32 bits of size_t width.
+  // We choose this as large as possible (rather than MAX_SAFE_INTEGER range)
+  // because TypedArray accesses will treat all string keys that are
+  // canonical representations of numbers in the range [MAX_SAFE_INTEGER ..
+  // size_t::max] as out-of-bounds accesses, and we can handle those in the
+  // fast path if we tag them as such (see kIsNotIntegerIndexMask).
+  static const int kMaxIntegerIndexSize = 10 * (sizeof(size_t) / 4);
 
   // For strings which are array indexes the hash value has the string length
   // mixed into the hash, mainly to avoid a hash value of zero which would be
@@ -100,10 +115,10 @@ class Name : public TorqueGeneratedName<Name, HeapObject> {
   STATIC_ASSERT(kMaxArrayIndexSize < (1 << kArrayIndexLengthBits));
 
   using ArrayIndexValueBits =
-      BitField<unsigned int, kNofHashBitFields, kArrayIndexValueBits>;
+      base::BitField<unsigned int, kNofHashBitFields, kArrayIndexValueBits>;
   using ArrayIndexLengthBits =
-      BitField<unsigned int, kNofHashBitFields + kArrayIndexValueBits,
-               kArrayIndexLengthBits>;
+      base::BitField<unsigned int, kNofHashBitFields + kArrayIndexValueBits,
+                     kArrayIndexLengthBits>;
 
   // Check that kMaxCachedArrayIndexLength + 1 is a power of two so we
   // could use a mask to test if the length of string is less than or equal to
@@ -120,7 +135,7 @@ class Name : public TorqueGeneratedName<Name, HeapObject> {
 
   // Value of empty hash field indicating that the hash is not computed.
   static const int kEmptyHashField =
-      kIsNotArrayIndexMask | kHashNotComputedMask;
+      kIsNotIntegerIndexMask | kIsNotArrayIndexMask | kHashNotComputedMask;
 
  protected:
   static inline bool IsHashFieldComputed(uint32_t field);
@@ -159,6 +174,14 @@ class Symbol : public TorqueGeneratedSymbol<Symbol, Name> {
   inline bool is_private_name() const;
   inline void set_is_private_name();
 
+  // [is_private_name]: Whether this is a brand symbol.  Brand symbols are
+  // private name symbols that are used for validating access to
+  // private methods and storing information about the private methods.
+  //
+  // This also sets the is_private bit.
+  inline bool is_private_brand() const;
+  inline void set_is_private_brand();
+
   // Dispatched behavior.
   DECL_PRINTER(Symbol)
   DECL_VERIFIER(Symbol)
@@ -169,12 +192,13 @@ class Symbol : public TorqueGeneratedSymbol<Symbol, Name> {
   V(IsWellKnownSymbolBit, bool, 1, _)     \
   V(IsInPublicSymbolTableBit, bool, 1, _) \
   V(IsInterestingSymbolBit, bool, 1, _)   \
-  V(IsPrivateNameBit, bool, 1, _)
+  V(IsPrivateNameBit, bool, 1, _)         \
+  V(IsPrivateBrandBit, bool, 1, _)
 
   DEFINE_BIT_FIELDS(FLAGS_BIT_FIELDS)
 #undef FLAGS_BIT_FIELDS
 
-  using BodyDescriptor = FixedBodyDescriptor<kNameOffset, kSize, kSize>;
+  using BodyDescriptor = FixedBodyDescriptor<kDescriptionOffset, kSize, kSize>;
 
   void SymbolShortPrint(std::ostream& os);
 

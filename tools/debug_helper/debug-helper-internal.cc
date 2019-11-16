@@ -4,6 +4,7 @@
 
 #include "debug-helper-internal.h"
 #include "src/common/ptr-compr-inl.h"
+#include "torque-generated/class-debug-readers-tq.h"
 
 namespace i = v8::internal;
 
@@ -11,15 +12,14 @@ namespace v8_debug_helper_internal {
 
 bool IsPointerCompressed(uintptr_t address) {
 #if COMPRESS_POINTERS_BOOL
-  STATIC_ASSERT(i::kPtrComprHeapReservationSize == uintptr_t{1} << 32);
-  intptr_t signed_address = static_cast<intptr_t>(address);
-  return signed_address >= INT32_MIN && signed_address <= INT32_MAX;
+  return address < i::kPtrComprHeapReservationSize;
 #else
   return false;
 #endif
 }
 
-uintptr_t Decompress(uintptr_t address, uintptr_t any_uncompressed_ptr) {
+uintptr_t EnsureDecompressed(uintptr_t address,
+                             uintptr_t any_uncompressed_ptr) {
   if (!COMPRESS_POINTERS_BOOL || !IsPointerCompressed(address)) return address;
   return i::DecompressTaggedAny(any_uncompressed_ptr,
                                 static_cast<i::Tagged_t>(address));
@@ -44,8 +44,18 @@ d::PropertyKind GetArrayKind(d::MemoryAccessResult mem_result) {
 }
 
 std::vector<std::unique_ptr<ObjectProperty>> TqObject::GetProperties(
-    d::MemoryAccessor accessor) {
+    d::MemoryAccessor accessor) const {
   return std::vector<std::unique_ptr<ObjectProperty>>();
+}
+
+const char* TqObject::GetName() const { return "v8::internal::Object"; }
+
+void TqObject::Visit(TqObjectVisitor* visitor) const {
+  visitor->VisitObject(this);
+}
+
+bool TqObject::IsSuperclassOf(const TqObject* other) const {
+  return GetName() != other->GetName();
 }
 
 }  // namespace v8_debug_helper_internal

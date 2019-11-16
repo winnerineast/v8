@@ -42,13 +42,17 @@ class LiftoffAssembler : public TurboAssembler {
    public:
     enum Location : uint8_t { kStack, kRegister, kIntConst };
 
-    explicit VarState(ValueType type) : loc_(kStack), type_(type) {}
-    explicit VarState(ValueType type, LiftoffRegister r)
-        : loc_(kRegister), type_(type), reg_(r) {
+    explicit VarState(ValueType type, uint32_t offset)
+        : loc_(kStack), type_(type), spill_offset_(offset) {}
+    explicit VarState(ValueType type, LiftoffRegister r, uint32_t offset)
+        : loc_(kRegister), type_(type), reg_(r), spill_offset_(offset) {
       DCHECK_EQ(r.reg_class(), reg_class_for(type));
     }
-    explicit VarState(ValueType type, int32_t i32_const)
-        : loc_(kIntConst), type_(type), i32_const_(i32_const) {
+    explicit VarState(ValueType type, int32_t i32_const, uint32_t offset)
+        : loc_(kIntConst),
+          type_(type),
+          i32_const_(i32_const),
+          spill_offset_(offset) {
       DCHECK(type_ == kWasmI32 || type_ == kWasmI64);
     }
 
@@ -87,6 +91,8 @@ class LiftoffAssembler : public TurboAssembler {
                                : WasmValue(int64_t{i32_const_});
     }
 
+    uint32_t offset() const { return spill_offset_; }
+
     Register gp_reg() const { return reg().gp(); }
     DoubleRegister fp_reg() const { return reg().fp(); }
     LiftoffRegister reg() const {
@@ -107,6 +113,7 @@ class LiftoffAssembler : public TurboAssembler {
       LiftoffRegister reg_;  // used if loc_ == kRegister
       int32_t i32_const_;    // used if loc_ == kIntConst
     };
+    uint32_t spill_offset_;
   };
 
   ASSERT_TRIVIALLY_COPYABLE(VarState);
@@ -228,7 +235,7 @@ class LiftoffAssembler : public TurboAssembler {
       return reg;
     }
 
-    // TODO(clemensh): Don't copy the full parent state (this makes us N^2).
+    // TODO(clemensb): Don't copy the full parent state (this makes us N^2).
     void InitMerge(const CacheState& source, uint32_t num_locals,
                    uint32_t arity, uint32_t stack_depth);
 
@@ -252,10 +259,29 @@ class LiftoffAssembler : public TurboAssembler {
 
   LiftoffRegister PopToRegister(LiftoffRegList pinned = {});
 
+  uint32_t NextSpillOffset() {
+    if (cache_state_.stack_state.empty()) {
+      return 0;
+    }
+    VarState last = cache_state_.stack_state.back();
+    uint32_t offset =
+        last.offset() + ValueTypes::ElementSizeInBytes(last.type());
+    return offset;
+  }
+
   void PushRegister(ValueType type, LiftoffRegister reg) {
     DCHECK_EQ(reg_class_for(type), reg.reg_class());
     cache_state_.inc_used(reg);
-    cache_state_.stack_state.emplace_back(type, reg);
+    cache_state_.stack_state.emplace_back(type, reg, NextSpillOffset());
+  }
+
+  void PushConstant(ValueType type, int32_t i32_const) {
+    DCHECK(type == kWasmI32 || type == kWasmI64);
+    cache_state_.stack_state.emplace_back(type, i32_const, NextSpillOffset());
+  }
+
+  void PushStack(ValueType type) {
+    cache_state_.stack_state.emplace_back(type, NextSpillOffset());
   }
 
   void SpillRegister(LiftoffRegister);
@@ -386,6 +412,7 @@ class LiftoffAssembler : public TurboAssembler {
   // Only used on 32-bit systems: Fill a register from a "half stack slot", i.e.
   // 4 bytes on the stack holding half of a 64-bit value.
   inline void FillI64Half(Register, uint32_t index, RegPairHalf);
+  inline void FillStackSlotsWithZero(uint32_t index, uint32_t count);
 
   // i32 binops.
   inline void emit_i32_add(Register dst, Register lhs, Register rhs);
@@ -407,17 +434,16 @@ class LiftoffAssembler : public TurboAssembler {
   inline void emit_i32_or(Register dst, Register lhs, int32_t imm);
   inline void emit_i32_xor(Register dst, Register lhs, Register rhs);
   inline void emit_i32_xor(Register dst, Register lhs, int32_t imm);
-  inline void emit_i32_shl(Register dst, Register src, Register amount,
-                           LiftoffRegList pinned = {});
-  inline void emit_i32_sar(Register dst, Register src, Register amount,
-                           LiftoffRegList pinned = {});
-  inline void emit_i32_shr(Register dst, Register src, Register amount,
-                           LiftoffRegList pinned = {});
-  inline void emit_i32_shr(Register dst, Register src, int amount);
+  inline void emit_i32_shl(Register dst, Register src, Register amount);
+  inline void emit_i32_shl(Register dst, Register src, int32_t amount);
+  inline void emit_i32_sar(Register dst, Register src, Register amount);
+  inline void emit_i32_sar(Register dst, Register src, int32_t amount);
+  inline void emit_i32_shr(Register dst, Register src, Register amount);
+  inline void emit_i32_shr(Register dst, Register src, int32_t amount);
 
   // i32 unops.
-  inline bool emit_i32_clz(Register dst, Register src);
-  inline bool emit_i32_ctz(Register dst, Register src);
+  inline void emit_i32_clz(Register dst, Register src);
+  inline void emit_i32_ctz(Register dst, Register src);
   inline bool emit_i32_popcnt(Register dst, Register src);
 
   // i64 binops.
@@ -451,13 +477,22 @@ class LiftoffAssembler : public TurboAssembler {
   inline void emit_i64_xor(LiftoffRegister dst, LiftoffRegister lhs,
                            int32_t imm);
   inline void emit_i64_shl(LiftoffRegister dst, LiftoffRegister src,
-                           Register amount, LiftoffRegList pinned = {});
+                           Register amount);
+  inline void emit_i64_shl(LiftoffRegister dst, LiftoffRegister src,
+                           int32_t amount);
   inline void emit_i64_sar(LiftoffRegister dst, LiftoffRegister src,
-                           Register amount, LiftoffRegList pinned = {});
+                           Register amount);
+  inline void emit_i64_sar(LiftoffRegister dst, LiftoffRegister src,
+                           int32_t amount);
   inline void emit_i64_shr(LiftoffRegister dst, LiftoffRegister src,
-                           Register amount, LiftoffRegList pinned = {});
+                           Register amount);
   inline void emit_i64_shr(LiftoffRegister dst, LiftoffRegister src,
-                           int amount);
+                           int32_t amount);
+
+  // i64 unops.
+  inline void emit_i64_clz(LiftoffRegister dst, LiftoffRegister src);
+  inline void emit_i64_ctz(LiftoffRegister dst, LiftoffRegister src);
+  inline bool emit_i64_popcnt(LiftoffRegister dst, LiftoffRegister src);
 
   inline void emit_i32_to_intptr(Register dst, Register src);
 

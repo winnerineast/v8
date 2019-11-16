@@ -24,9 +24,9 @@
 
 namespace v8_inspector {
 namespace {
-using ::v8_inspector_protocol_encoding::span;
-using ::v8_inspector_protocol_encoding::SpanFrom;
-using IPEStatus = ::v8_inspector_protocol_encoding::Status;
+using v8_crdtp::span;
+using v8_crdtp::SpanFrom;
+using IPEStatus = v8_crdtp::Status;
 
 bool IsCBORMessage(const StringView& msg) {
   return msg.is8Bit() && msg.length() >= 2 && msg.characters8()[0] == 0xd8 &&
@@ -163,7 +163,7 @@ protocol::DictionaryValue* V8InspectorSessionImpl::agentState(
 
 std::unique_ptr<StringBuffer> V8InspectorSessionImpl::serializeForFrontend(
     std::unique_ptr<protocol::Serializable> message) {
-  std::vector<uint8_t> cbor = message->serializeToBinary();
+  std::vector<uint8_t> cbor = std::move(*message).TakeSerialized();
   if (use_binary_protocol_)
     return std::unique_ptr<StringBuffer>(
         new BinaryStringBuffer(std::move(cbor)));
@@ -332,8 +332,8 @@ void V8InspectorSessionImpl::reportAllContexts(V8RuntimeAgentImpl* agent) {
 
 void V8InspectorSessionImpl::dispatchProtocolMessage(
     const StringView& message) {
-  using ::v8_inspector_protocol_encoding::span;
-  using ::v8_inspector_protocol_encoding::SpanFrom;
+  using v8_crdtp::span;
+  using v8_crdtp::SpanFrom;
   span<uint8_t> cbor;
   std::vector<uint8_t> converted_cbor;
   if (IsCBORMessage(message)) {
@@ -366,9 +366,7 @@ void V8InspectorSessionImpl::dispatchProtocolMessage(
 }
 
 std::vector<uint8_t> V8InspectorSessionImpl::state() {
-  std::vector<uint8_t> out;
-  m_state->writeBinary(&out);
-  return out;
+  return std::move(*m_state).TakeSerialized();
 }
 
 std::vector<std::unique_ptr<protocol::Schema::API::Domain>>

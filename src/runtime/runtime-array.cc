@@ -5,6 +5,7 @@
 #include "src/debug/debug.h"
 #include "src/execution/arguments-inl.h"
 #include "src/execution/isolate-inl.h"
+#include "src/execution/protectors-inl.h"
 #include "src/heap/factory.h"
 #include "src/heap/heap-inl.h"  // For ToBoolean. TODO(jkummerow): Drop.
 #include "src/heap/heap-write-barrier-inl.h"
@@ -136,8 +137,8 @@ RUNTIME_FUNCTION(Runtime_NewArray) {
       // just flip the bit on the global protector cell instead.
       // TODO(bmeurer): Find a better way to mark this. Global protectors
       // tend to back-fire over time...
-      if (isolate->IsArrayConstructorIntact()) {
-        isolate->InvalidateArrayConstructorProtector();
+      if (Protectors::IsArrayConstructorIntact(isolate)) {
+        Protectors::InvalidateArrayConstructor(isolate);
       }
     }
   }
@@ -163,14 +164,14 @@ RUNTIME_FUNCTION(Runtime_GrowArrayElements) {
   CONVERT_ARG_HANDLE_CHECKED(JSObject, object, 0);
   CONVERT_NUMBER_CHECKED(int, key, Int32, args[1]);
 
-  if (key < 0) return Smi::kZero;
+  if (key < 0) return Smi::zero();
 
   uint32_t capacity = static_cast<uint32_t>(object->elements().length());
   uint32_t index = static_cast<uint32_t>(key);
 
   if (index >= capacity) {
     if (!object->GetElementsAccessor()->GrowCapacity(object, index)) {
-      return Smi::kZero;
+      return Smi::zero();
     }
   }
 

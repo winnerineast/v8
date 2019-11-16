@@ -61,7 +61,7 @@ namespace v8 {
 namespace internal {
 
 // Simulators only support C calls with up to kMaxCParameters parameters.
-static constexpr int kMaxCParameters = 9;
+static constexpr int kMaxCParameters = 10;
 
 class FrameScope {
  public:
@@ -184,34 +184,6 @@ class NoRootArrayScope {
  private:
   TurboAssembler* masm_;
   bool old_value_;
-};
-
-// Wrapper class for passing expected and actual parameter counts as
-// either registers or immediate values. Used to make sure that the
-// caller provides exactly the expected number of parameters to the
-// callee.
-class ParameterCount {
- public:
-  explicit ParameterCount(Register reg) : reg_(reg), immediate_(0) {}
-  explicit ParameterCount(uint16_t imm) : reg_(no_reg), immediate_(imm) {}
-
-  bool is_reg() const { return reg_.is_valid(); }
-  bool is_immediate() const { return !is_reg(); }
-
-  Register reg() const {
-    DCHECK(is_reg());
-    return reg_;
-  }
-  uint16_t immediate() const {
-    DCHECK(is_immediate());
-    return immediate_;
-  }
-
- private:
-  const Register reg_;
-  const uint16_t immediate_;
-
-  DISALLOW_IMPLICIT_CONSTRUCTORS(ParameterCount);
 };
 
 }  // namespace internal

@@ -55,7 +55,7 @@ class V8_EXPORT_PRIVATE RegExpBytecodeGenerator : public RegExpMacroAssembler {
   virtual void CheckCharacterGT(uc16 limit, Label* on_greater);
   virtual void CheckCharacterLT(uc16 limit, Label* on_less);
   virtual void CheckGreedyLoop(Label* on_tos_equals_current_position);
-  virtual void CheckAtStart(Label* on_at_start);
+  virtual void CheckAtStart(int cp_offset, Label* on_at_start);
   virtual void CheckNotAtStart(int cp_offset, Label* on_not_at_start);
   virtual void CheckNotCharacter(unsigned c, Label* on_not_equal);
   virtual void CheckNotCharacterAfterAnd(unsigned c, unsigned mask,
@@ -99,6 +99,12 @@ class V8_EXPORT_PRIVATE RegExpBytecodeGenerator : public RegExpMacroAssembler {
   int advance_current_start_;
   int advance_current_offset_;
   int advance_current_end_;
+
+  // Stores jump edges emitted for the bytecode (used by
+  // RegExpBytecodePeepholeOptimization).
+  // Key: jump source (offset in buffer_ where jump destination is stored).
+  // Value: jump destination (offset in buffer_ to jump to).
+  ZoneUnorderedMap<int, int> jump_edges_;
 
   Isolate* isolate_;
 

@@ -36,7 +36,6 @@
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/execution/frames.h"
 #include "src/objects/objects-inl.h"
-#include "src/snapshot/natives.h"
 #include "src/snapshot/snapshot.h"
 #include "src/utils/utils.h"
 #include "test/cctest/cctest.h"
@@ -893,7 +892,6 @@ TEST(BreakPointInlineBoundBuiltin) {
 
 TEST(BreakPointInlinedConstructorBuiltin) {
   i::FLAG_allow_natives_syntax = true;
-  i::FLAG_experimental_inline_promise_constructor = true;
   LocalContext env;
   v8::HandleScope scope(env->GetIsolate());
 
@@ -1032,8 +1030,6 @@ TEST(BreakPointBuiltinNewContext) {
   i::Handle<i::BreakPoint> bp;
 
 // === Test builtin from a new context ===
-// This does not work with no-snapshot build.
-#ifdef V8_USE_SNAPSHOT
   break_point_hit_count = 0;
   builtin = CompileRun("String.prototype.repeat").As<v8::Function>();
   CompileRun("'a'.repeat(10)");
@@ -1059,7 +1055,6 @@ TEST(BreakPointBuiltinNewContext) {
     CompileRun("'b'.repeat(10)");
     CHECK_EQ(2, break_point_hit_count);
   }
-#endif
 
   v8::debug::SetDebugDelegate(env->GetIsolate(), nullptr);
   CheckDebuggerUnloaded();
@@ -1097,14 +1092,15 @@ TEST(BreakPointApiFunction) {
   ExpectInt32("f()", 2);
   CHECK_EQ(2, break_point_hit_count);
 
+  // Direct call through API does not trigger breakpoint.
   function->Call(env.local(), v8::Undefined(env->GetIsolate()), 0, nullptr)
       .ToLocalChecked();
-  CHECK_EQ(3, break_point_hit_count);
+  CHECK_EQ(2, break_point_hit_count);
 
   // Run without breakpoints.
   ClearBreakPoint(bp);
   ExpectInt32("f()", 2);
-  CHECK_EQ(3, break_point_hit_count);
+  CHECK_EQ(2, break_point_hit_count);
 
   v8::debug::SetDebugDelegate(env->GetIsolate(), nullptr);
   CheckDebuggerUnloaded();
@@ -1137,13 +1133,14 @@ TEST(BreakPointApiConstructor) {
   CompileRun("new f()");
   CHECK_EQ(2, break_point_hit_count);
 
+  // Direct call through API does not trigger breakpoint.
   function->NewInstance(env.local()).ToLocalChecked();
-  CHECK_EQ(3, break_point_hit_count);
+  CHECK_EQ(2, break_point_hit_count);
 
   // Run without breakpoints.
   ClearBreakPoint(bp);
   CompileRun("new f()");
-  CHECK_EQ(3, break_point_hit_count);
+  CHECK_EQ(2, break_point_hit_count);
 
   v8::debug::SetDebugDelegate(env->GetIsolate(), nullptr);
   CheckDebuggerUnloaded();
@@ -1188,15 +1185,16 @@ TEST(BreakPointApiGetter) {
   // Run with breakpoint.
   bp = SetBreakPoint(function, 0);
   CompileRun("get_wrapper(o, 'f')");
-  CHECK_EQ(1, break_point_hit_count);
+  CHECK_EQ(0, break_point_hit_count);
 
   CompileRun("o.f");
-  CHECK_EQ(2, break_point_hit_count);
+  CHECK_EQ(1, break_point_hit_count);
 
   // Run without breakpoints.
   ClearBreakPoint(bp);
   CompileRun("get_wrapper(o, 'f', 2)");
-  CHECK_EQ(2, break_point_hit_count);
+  CompileRun("o.f");
+  CHECK_EQ(1, break_point_hit_count);
 
   v8::debug::SetDebugDelegate(env->GetIsolate(), nullptr);
   CheckDebuggerUnloaded();
@@ -1245,12 +1243,12 @@ TEST(BreakPointApiSetter) {
   CHECK_EQ(1, break_point_hit_count);
 
   CompileRun("set_wrapper(o, 'f', 2)");
-  CHECK_EQ(2, break_point_hit_count);
+  CHECK_EQ(1, break_point_hit_count);
 
   // Run without breakpoints.
   ClearBreakPoint(bp);
   CompileRun("o.f = 3");
-  CHECK_EQ(2, break_point_hit_count);
+  CHECK_EQ(1, break_point_hit_count);
 
   // === Test API builtin as setter, with condition ===
   break_point_hit_count = 0;
@@ -1261,15 +1259,16 @@ TEST(BreakPointApiSetter) {
   CHECK_EQ(0, break_point_hit_count);
 
   CompileRun("set_wrapper(o, 'f', 3)");
-  CHECK_EQ(1, break_point_hit_count);
+  CHECK_EQ(0, break_point_hit_count);
 
   CompileRun("o.f = 3");
-  CHECK_EQ(2, break_point_hit_count);
+  CHECK_EQ(1, break_point_hit_count);
 
   // Run without breakpoints.
   ClearBreakPoint(bp);
   CompileRun("set_wrapper(o, 'f', 2)");
-  CHECK_EQ(2, break_point_hit_count);
+  CompileRun("o.f = 3");
+  CHECK_EQ(1, break_point_hit_count);
 
   v8::debug::SetDebugDelegate(env->GetIsolate(), nullptr);
   CheckDebuggerUnloaded();
@@ -3131,8 +3130,8 @@ TEST(NoBreakWhenBootstrapping) {
   {
     // Create a context with an extension to make sure that some JavaScript
     // code is executed during bootstrapping.
-    v8::RegisterExtension(v8::base::make_unique<v8::Extension>(
-        "simpletest", kSimpleExtensionSource));
+    v8::RegisterExtension(
+        std::make_unique<v8::Extension>("simpletest", kSimpleExtensionSource));
     const char* extension_names[] = { "simpletest" };
     v8::ExtensionConfiguration extensions(1, extension_names);
     v8::HandleScope handle_scope(isolate);
@@ -3476,6 +3475,35 @@ TEST(SyntaxErrorEventOnSyntaxException) {
   v8::Script::Compile(context, v8_str(env->GetIsolate(), "throw 1;"))
       .ToLocalChecked();
   CHECK_EQ(3, delegate.compile_error_event_count);
+}
+
+class ExceptionEventCounter : public v8::debug::DebugDelegate {
+ public:
+  void ExceptionThrown(v8::Local<v8::Context> paused_context,
+                       v8::Local<v8::Value> exception,
+                       v8::Local<v8::Value> promise, bool is_uncaught,
+                       v8::debug::ExceptionType) override {
+    exception_event_count++;
+  }
+  int exception_event_count = 0;
+};
+
+TEST(NoBreakOnStackOverflow) {
+  i::FLAG_stack_size = 100;
+  LocalContext env;
+  v8::HandleScope scope(env->GetIsolate());
+
+  ChangeBreakOnException(true, true);
+
+  ExceptionEventCounter delegate;
+  v8::debug::SetDebugDelegate(env->GetIsolate(), &delegate);
+  CHECK_EQ(0, delegate.exception_event_count);
+
+  CompileRun(
+      "function f() { return f(); }"
+      "try { f() } catch {}");
+
+  CHECK_EQ(0, delegate.exception_event_count);
 }
 
 // Tests that break event is sent when event listener is reset.
@@ -4477,7 +4505,7 @@ UNINITIALIZED_TEST(LoadedAtStartupScripts) {
       }
     }
     CHECK_EQ(count_by_type[i::Script::TYPE_NATIVE], 0);
-    CHECK_EQ(count_by_type[i::Script::TYPE_EXTENSION], 2);
+    CHECK_EQ(count_by_type[i::Script::TYPE_EXTENSION], 1);
     CHECK_EQ(count_by_type[i::Script::TYPE_NORMAL], 1);
     CHECK_EQ(count_by_type[i::Script::TYPE_WASM], 0);
     CHECK_EQ(count_by_type[i::Script::TYPE_INSPECTOR], 0);

@@ -66,6 +66,24 @@ class ExpressionScope {
     return result;
   }
 
+  void MergeVariableList(
+      ScopedList<std::pair<VariableProxy*, int>>* variable_list) {
+    if (!CanBeExpression()) return;
+    // Merged variables come from a CanBeDeclaration expression scope, and
+    // weren't added as unresolved references to the variable scope yet. Add
+    // them to the variable scope on the boundary where it becomes clear they
+    // aren't declarations. We explicitly delay declaring the variables up to
+    // that point to avoid trying to add them to the unresolved list multiple
+    // times, e.g., for (((a))).
+    if (!CanBeDeclaration()) {
+      for (auto& proxy_initializer_pair : *variable_list) {
+        VariableProxy* proxy = proxy_initializer_pair.first;
+        this->parser()->scope()->AddUnresolved(proxy);
+      }
+    }
+    variable_list->MergeInto(AsExpressionParsingScope()->variable_list());
+  }
+
   Variable* Declare(const AstRawString* name, int pos = kNoSourcePosition) {
     if (type_ == kParameterDeclaration) {
       return AsParameterDeclarationParsingScope()->Declare(name, pos);
@@ -178,7 +196,7 @@ class ExpressionScope {
   }
 
   bool IsCertainlyDeclaration() const {
-    return IsInRange(type_, kParameterDeclaration, kLexicalDeclaration);
+    return base::IsInRange(type_, kParameterDeclaration, kLexicalDeclaration);
   }
 
   int SetInitializers(int variable_index, int peek_position) {
@@ -187,6 +205,10 @@ class ExpressionScope {
                                                          peek_position);
     }
     return variable_index;
+  }
+
+  bool has_possible_arrow_parameter_in_scope_chain() const {
+    return has_possible_arrow_parameter_in_scope_chain_;
   }
 
  protected:
@@ -217,7 +239,11 @@ class ExpressionScope {
         type_(type),
         has_possible_parameter_in_scope_chain_(
             CanBeParameterDeclaration() ||
-            (parent_ && parent_->has_possible_parameter_in_scope_chain_)) {
+            (parent_ && parent_->has_possible_parameter_in_scope_chain_)),
+        has_possible_arrow_parameter_in_scope_chain_(
+            CanBeArrowParameterDeclaration() ||
+            (parent_ &&
+             parent_->has_possible_arrow_parameter_in_scope_chain_)) {
     parser->expression_scope_ = this;
   }
 
@@ -237,14 +263,15 @@ class ExpressionScope {
 #endif
 
   bool CanBeExpression() const {
-    return IsInRange(type_, kExpression, kMaybeAsyncArrowParameterDeclaration);
+    return base::IsInRange(type_, kExpression,
+                           kMaybeAsyncArrowParameterDeclaration);
   }
   bool CanBeDeclaration() const {
-    return IsInRange(type_, kMaybeArrowParameterDeclaration,
-                     kLexicalDeclaration);
+    return base::IsInRange(type_, kMaybeArrowParameterDeclaration,
+                           kLexicalDeclaration);
   }
   bool IsVariableDeclaration() const {
-    return IsInRange(type_, kVarDeclaration, kLexicalDeclaration);
+    return base::IsInRange(type_, kVarDeclaration, kLexicalDeclaration);
   }
   bool IsLexicalDeclaration() const { return type_ == kLexicalDeclaration; }
   bool IsAsyncArrowHeadParsingScope() const {
@@ -273,13 +300,17 @@ class ExpressionScope {
   }
 
   bool IsArrowHeadParsingScope() const {
-    return IsInRange(type_, kMaybeArrowParameterDeclaration,
-                     kMaybeAsyncArrowParameterDeclaration);
+    return base::IsInRange(type_, kMaybeArrowParameterDeclaration,
+                           kMaybeAsyncArrowParameterDeclaration);
   }
   bool IsCertainlyPattern() const { return IsCertainlyDeclaration(); }
   bool CanBeParameterDeclaration() const {
-    return IsInRange(type_, kMaybeArrowParameterDeclaration,
-                     kParameterDeclaration);
+    return base::IsInRange(type_, kMaybeArrowParameterDeclaration,
+                           kParameterDeclaration);
+  }
+  bool CanBeArrowParameterDeclaration() const {
+    return base::IsInRange(type_, kMaybeArrowParameterDeclaration,
+                           kMaybeAsyncArrowParameterDeclaration);
   }
   bool IsCertainlyParameterDeclaration() const {
     return type_ == kParameterDeclaration;
@@ -289,6 +320,7 @@ class ExpressionScope {
   ExpressionScope<Types>* parent_;
   ScopeType type_;
   bool has_possible_parameter_in_scope_chain_;
+  bool has_possible_arrow_parameter_in_scope_chain_;
 
   DISALLOW_COPY_AND_ASSIGN(ExpressionScope);
 };
@@ -525,6 +557,10 @@ class ExpressionParsingScope : public ExpressionScope<Types> {
     return end;
   }
 
+  ScopedList<std::pair<VariableProxy*, int>>* variable_list() {
+    return &variable_list_;
+  }
+
  protected:
   bool is_verified() const {
 #ifdef DEBUG
@@ -535,10 +571,6 @@ class ExpressionParsingScope : public ExpressionScope<Types> {
   }
 
   void ValidatePattern() { Validate(kPatternIndex); }
-
-  ScopedList<std::pair<VariableProxy*, int>>* variable_list() {
-    return &variable_list_;
-  }
 
  private:
   friend class AccumulationScope<Types>;
@@ -612,14 +644,8 @@ class AccumulationScope {
     if (!scope->CanBeExpression()) return;
     scope_ = scope->AsExpressionParsingScope();
     for (int i = 0; i < kNumberOfErrors; i++) {
-      // If the underlying scope is already invalid at the start, stop
-      // accumulating. That means an error was found outside of an
-      // accumulating path.
-      if (!scope_->is_valid(i)) {
-        scope_ = nullptr;
-        break;
-      }
       copy(i);
+      scope_->clear(i);
     }
   }
 
@@ -707,21 +733,19 @@ class ArrowHeadParsingScope : public ExpressionParsingScope<Types> {
     // references.
     this->parser()->next_arrow_function_info_.ClearStrictParameterError();
     ExpressionParsingScope<Types>::ValidateExpression();
-    for (auto& proxy_initializer_pair : *this->variable_list()) {
-      VariableProxy* proxy = proxy_initializer_pair.first;
-      this->parser()->scope()->AddUnresolved(proxy);
-    }
+    this->parent()->MergeVariableList(this->variable_list());
   }
 
   DeclarationScope* ValidateAndCreateScope() {
     DCHECK(!this->is_verified());
+    DeclarationScope* result = this->parser()->NewFunctionScope(kind());
     if (declaration_error_location.IsValid()) {
       ExpressionScope<Types>::Report(declaration_error_location,
                                      declaration_error_message);
+      return result;
     }
     this->ValidatePattern();
 
-    DeclarationScope* result = this->parser()->NewFunctionScope(kind());
     if (!has_simple_parameter_list_) result->SetHasNonSimpleParameters();
     VariableKind kind = PARAMETER_VARIABLE;
     VariableMode mode =

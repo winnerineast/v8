@@ -97,6 +97,7 @@ ReadOnlyHeap* ReadOnlyHeap::CreateAndAttachToIsolate(Isolate* isolate) {
 
 void ReadOnlyHeap::InitFromIsolate(Isolate* isolate) {
   DCHECK(!init_complete_);
+  read_only_space_->ShrinkImmortalImmovablePages();
 #ifdef V8_SHARED_RO_HEAP
   void* const isolate_ro_roots = reinterpret_cast<void*>(
       isolate->roots_table().read_only_roots_begin().address());
@@ -131,12 +132,17 @@ void ReadOnlyHeap::ClearSharedHeapForTest() {
 }
 
 // static
+bool ReadOnlyHeap::Contains(Address address) {
+  return MemoryChunk::FromAddress(address)->InReadOnlySpace();
+}
+
+// static
 bool ReadOnlyHeap::Contains(HeapObject object) {
   return MemoryChunk::FromHeapObject(object)->InReadOnlySpace();
 }
 
 Object* ReadOnlyHeap::ExtendReadOnlyObjectCache() {
-  read_only_object_cache_.push_back(Smi::kZero);
+  read_only_object_cache_.push_back(Smi::zero());
   return &read_only_object_cache_.back();
 }
 
@@ -182,7 +188,7 @@ HeapObject ReadOnlyHeapObjectIterator::Next() {
     const int object_size = object.Size();
     current_addr_ += object_size;
 
-    if (object.IsFiller()) {
+    if (object.IsFreeSpaceOrFiller()) {
       continue;
     }
 
